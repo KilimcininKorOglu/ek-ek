@@ -1,2 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Yerel ortam ve sırlar
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editör ve işletim sistemi
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.DS_Store
+
+# Test ve araç çıktıları
+/tmp/
+docker-data/
+.playwright-mcp/
+coverage/
+*.profraw
+
+# İç planlama ve tasarım kaynakları (ADR-0047)
 plan/
 design/
