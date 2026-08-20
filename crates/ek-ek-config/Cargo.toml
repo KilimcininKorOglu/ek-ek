@@ -1,0 +1,10 @@
+[package]
+name = "ek-ek-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Configuration domain model, serialisation and validation"
+
+# This crate must never depend on another workspace crate (ADR-0014).
+[dependencies]

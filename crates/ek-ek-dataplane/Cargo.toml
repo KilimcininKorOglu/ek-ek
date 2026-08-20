@@ -1,0 +1,10 @@
+[package]
+name = "ek-ek-dataplane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Traffic path: HTTP, TCP and UDP proxying, TLS termination, health checks"
+
+# Must never depend on ek-ek-vrrp (ADR-0014).
+[dependencies]

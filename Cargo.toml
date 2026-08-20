@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["Kerem Gok"]
+
+[workspace.dependencies]
+clap = { version = "4.6", features = ["derive"] }
+
+# Layer boundaries are enforced by the dependency direction between crates.
+# ek-ek-config depends on no workspace crate.
+# ek-ek-dataplane and ek-ek-vrrp never depend on each other.
+ek-ek-agent = { path = "crates/ek-ek-agent" }
+ek-ek-api = { path = "crates/ek-ek-api" }
+ek-ek-config = { path = "crates/ek-ek-config" }
+ek-ek-dataplane = { path = "crates/ek-ek-dataplane" }
+ek-ek-ipc = { path = "crates/ek-ek-ipc" }
+ek-ek-store = { path = "crates/ek-ek-store" }
+ek-ek-vrrp = { path = "crates/ek-ek-vrrp" }
