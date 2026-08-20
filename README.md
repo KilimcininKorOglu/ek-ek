@@ -18,10 +18,10 @@ Every node runs the same binary. There is no central management server; nodes co
 
 The binary runs two processes:
 
-| Process | Responsibility |
-|---|---|
+| Process            | Responsibility                                                                                      |
+|--------------------|-----------------------------------------------------------------------------------------------------|
 | `ek-ek node-agent` | Configuration store, cluster membership, VRRP state machine, VIP management, web interface and API. |
-| `ek-ek data-plane` | The traffic itself. HTTP, TCP and UDP proxying, TLS termination, health checks. |
+| `ek-ek data-plane` | The traffic itself. HTTP, TCP and UDP proxying, TLS termination, health checks.                     |
 
 The two processes are separate because adding a new listening port replaces the `data-plane` process. If VRRP ran inside that same process, the replacement would briefly advertise the VIP from two nodes at once.
 

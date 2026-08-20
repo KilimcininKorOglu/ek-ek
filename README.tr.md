@@ -18,10 +18,10 @@ Her node aynı binary'yi çalıştırır. Merkezi bir yönetim sunucusu yoktur, 
 
 Binary iki process çalıştırır:
 
-| Process | Sorumluluk |
-|---|---|
+| Process            | Sorumluluk                                                                                   |
+|--------------------|----------------------------------------------------------------------------------------------|
 | `ek-ek node-agent` | Yapılandırma deposu, cluster üyeliği, VRRP durum makinesi, VIP yönetimi, web arayüzü ve API. |
-| `ek-ek data-plane` | Trafiğin kendisi. HTTP, TCP, UDP proxy'si, TLS sonlandırma, health check. |
+| `ek-ek data-plane` | Trafiğin kendisi. HTTP, TCP, UDP proxy'si, TLS sonlandırma, health check.                    |
 
 İki process ayrıdır çünkü yeni bir dinleme portu eklendiğinde `data-plane` process'i yerine yenisi konur. VRRP aynı process içinde çalışsaydı bu değişim VIP'in kısa süre iki node'da birden görünmesine yol açardı.
 
