@@ -11,7 +11,15 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-readonly COMPOSE=(docker compose -f docker/compose.yml)
+# --env-file is explicit: compose looks for .env next to the compose file, not
+# in the project root, and a missing HOST_UID makes the persistence check write
+# as the wrong user.
+readonly COMPOSE=(docker compose --env-file .env -f docker/compose.yml)
+
+if [ ! -f .env ]; then
+    echo "missing .env; run 'make dev-env' first"
+    exit 1
+fi
 readonly NODE1=node1
 readonly NODE2=node2
 # Not assigned to any container; reserved for VIP tests.

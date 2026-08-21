@@ -77,7 +77,10 @@ ci: fmt-check lint deny check-headers check-apis check-docs check-secrets check-
 
 # --- Development environment ------------------------------------------------
 
-COMPOSE := docker compose -f docker/compose.yml
+# --env-file is explicit on purpose. Compose looks for .env next to the compose
+# file, not in the project root, so without this HOST_UID silently falls back to
+# its default and the bind mount fills with files owned by the wrong user.
+COMPOSE := docker compose --env-file .env -f docker/compose.yml
 DATA := docker-data
 NODES := node1 node2 node3
 BACKENDS := backend1 backend2
@@ -104,15 +107,15 @@ dev-up: dev-env ## Start the three node development cluster
 	@echo "cluster is up; run 'make dev-verify' to check its preconditions"
 
 .PHONY: dev-down
-dev-down: ## Stop the cluster and remove its network, keeping docker-data
+dev-down: dev-env ## Stop the cluster and remove its network, keeping docker-data
 	$(COMPOSE) down --remove-orphans
 
 .PHONY: dev-logs
-dev-logs: ## Follow logs from the development cluster
+dev-logs: dev-env ## Follow logs from the development cluster
 	$(COMPOSE) logs -f
 
 .PHONY: dev-verify
-dev-verify: ## Prove the preconditions the product depends on
+dev-verify: dev-env ## Prove the preconditions the product depends on
 	$(SCRIPTS)/verify-dev-env.sh
 
 # Destructive: it deletes the persistent development data. It says what it will
