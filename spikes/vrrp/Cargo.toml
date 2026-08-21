@@ -1,0 +1,24 @@
+# Throwaway spike for T-010. Not part of the workspace and not product code.
+#
+# It answers three questions that failover depends on: do VRRP advertisements
+# reach the peers, does the VIP actually move, and does gratuitous ARP make the
+# move visible on the network. The third one fails silently when it is missing,
+# which is why it gets its own measurement.
+#
+# libc is the only dependency. Every piece the spike has to prove (a raw socket
+# on IP protocol 112, an rtnetlink address change, an AF_PACKET frame) is a
+# syscall, so a wrapper crate would hide the exact thing under test.
+[workspace]
+
+[package]
+name = "spike-vrrp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "vrrp"
+path = "src/main.rs"
