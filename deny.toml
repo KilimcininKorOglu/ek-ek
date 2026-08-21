@@ -53,6 +53,11 @@ ignore = true
 multiple-versions = "warn"
 # A `*` version requirement makes the build non-reproducible.
 wildcards = "deny"
+# A path dependency inside this workspace carries no version requirement and
+# so reads as a wildcard. It is pinned by the checkout rather than by a
+# registry, and every crate here is `publish = false`, so the reproducibility
+# argument does not apply to it. Registry dependencies stay under the rule.
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 skip = []

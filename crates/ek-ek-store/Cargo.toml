@@ -9,6 +9,14 @@ publish = false
 description = "Raft replicated configuration store on a SQLite state machine"
 
 [dependencies]
+chacha20poly1305 = { workspace = true }
+ek-ek-config = { workspace = true }
+getrandom = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
