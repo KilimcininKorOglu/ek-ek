@@ -72,3 +72,5 @@ in `SECURITY.md` later. Until then these two channels are the ones that work.
 Open an issue first for anything larger than a fix. Say what you observed, what
 you expected, and what the environment was: distribution, kernel, how ek-ek was
 installed, and how many nodes are in the cluster.
+
+<!-- test pull request for the CLA check; not merged -->
