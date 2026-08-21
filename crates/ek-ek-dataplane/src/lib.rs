@@ -29,6 +29,8 @@ pub mod proxy;
 pub mod server;
 pub mod sticky;
 pub mod stream;
+pub mod udp;
+pub mod udpproxy;
 
 pub use balance::{Balancer, ring_for};
 pub use error::{Error, ErrorKind, Result};

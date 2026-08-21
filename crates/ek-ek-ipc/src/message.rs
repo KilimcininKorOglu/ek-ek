@@ -91,6 +91,12 @@ pub struct Counters {
     /// node's VRRP priority over a single blip.
     #[serde(default)]
     pub backend_connect_failures: u64,
+    /// UDP sessions dropped because their table was full (ADR-0025).
+    ///
+    /// A number that keeps climbing says the limit is too low for the
+    /// traffic, which is the only way an operator finds that out.
+    #[serde(default)]
+    pub udp_sessions_evicted: u64,
 }
 
 /// How many connections one member is carrying, and from where (ADR-0061).
@@ -109,6 +115,24 @@ pub struct OpenConnections {
     pub member: String,
     /// How many are open right now.
     pub count: u64,
+}
+
+/// How many UDP sessions one frontend is holding (ADR-0066).
+///
+/// A live count rather than a total, so it belongs here and not in
+/// [`Counters`], which only carries numbers that grow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpSessions {
+    /// The frontend holding them.
+    pub frontend: String,
+    /// How many sessions are in its table right now.
+    pub count: u64,
+    /// How many the table holds at most.
+    ///
+    /// Reported beside the count so an operator reading one number sees how
+    /// close it is to the limit without also reading the configuration.
+    pub limit: u64,
 }
 
 /// What one member's health check says, and how often it has changed
@@ -156,6 +180,9 @@ pub struct StatusReport {
     /// pool with no health check are left out: health does not exist there.
     #[serde(default)]
     pub member_health: Vec<MemberHealth>,
+    /// How full each UDP frontend's session table is (ADR-0066).
+    #[serde(default)]
+    pub udp_sessions: Vec<UdpSessions>,
 }
 
 /// Why a delivered configuration was not applied.

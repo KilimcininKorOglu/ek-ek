@@ -139,6 +139,7 @@ pub fn http_frontend() -> Frontend {
         request_timeout_seconds: 60,
         idle_timeout_seconds: 0,
         drain_timeout_seconds: 30,
+        udp_session_limit: 0,
     }
 }
 
@@ -162,6 +163,7 @@ pub fn passthrough_frontend() -> Frontend {
         request_timeout_seconds: 60,
         idle_timeout_seconds: 0,
         drain_timeout_seconds: 60,
+        udp_session_limit: 0,
     }
 }
 
@@ -182,6 +184,7 @@ pub fn dns_tcp_frontend() -> Frontend {
         request_timeout_seconds: 60,
         idle_timeout_seconds: 0,
         drain_timeout_seconds: 10,
+        udp_session_limit: 0,
     }
 }
 
@@ -202,6 +205,7 @@ pub fn dns_udp_frontend() -> Frontend {
         request_timeout_seconds: 60,
         idle_timeout_seconds: 0,
         drain_timeout_seconds: 10,
+        udp_session_limit: 0,
     }
 }
 

@@ -12,7 +12,7 @@
 use ek_ek_config::{Config, SchemaVersion};
 use ek_ek_ipc::{
     AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, MemberHealth,
-    OpenConnections, StatusReport, decode, encode,
+    OpenConnections, StatusReport, UdpSessions, decode, encode,
 };
 
 fn empty_config() -> Config {
@@ -48,6 +48,7 @@ fn a_message_survives_a_round_trip() {
             configs_applied: 2,
             configs_rejected: 1,
             backend_connect_failures: 3,
+            udp_sessions_evicted: 9,
         },
         open_connections: vec![OpenConnections {
             frontend: "web".to_owned(),
@@ -60,6 +61,11 @@ fn a_message_survives_a_round_trip() {
             member: "web-1".to_owned(),
             healthy: false,
             transitions: 4,
+        }],
+        udp_sessions: vec![UdpSessions {
+            frontend: "dns-udp".to_owned(),
+            count: 128,
+            limit: 4096,
         }],
     });
     let line = encode(&report).expect("it must encode");
@@ -120,6 +126,7 @@ fn the_two_directions_do_not_read_as_each_other() {
         counters: Counters::default(),
         open_connections: Vec::new(),
         member_health: Vec::new(),
+        udp_sessions: Vec::new(),
     }))
     .expect("it must encode");
 

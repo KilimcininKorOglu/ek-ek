@@ -73,10 +73,14 @@ pub struct Frontend {
     /// How long a connection may sit with no byte moving in either direction,
     /// in seconds (ADR-0060).
     ///
-    /// Zero means no limit. The counter resets on traffic in either
-    /// direction, because a connection that sent a slow query and is waiting
-    /// for its answer is working, not idle. Only the L4 path reads this: on
-    /// an HTTP frontend the request limit already covers it.
+    /// The counter resets on traffic in either direction, because a
+    /// connection that sent a slow query and is waiting for its answer is
+    /// working, not idle. Only the L4 path reads this: on an HTTP frontend
+    /// the request limit already covers it.
+    ///
+    /// Zero means no limit on TCP. On UDP it means the default instead
+    /// (ADR-0066): a session table with no idle limit empties only through
+    /// eviction, so dead sessions would push live ones out.
     pub idle_timeout_seconds: u32,
     /// How long the frontend waits before it cuts what is left, in seconds.
     ///
@@ -84,6 +88,18 @@ pub struct Frontend {
     /// are no connections to finish, so it is the time the session table gets
     /// to empty before its remaining entries are dropped.
     pub drain_timeout_seconds: u32,
+    /// How many UDP sessions this frontend keeps at once.
+    ///
+    /// Each session holds its own socket to the backend, so this bounds file
+    /// descriptors as well as memory (ADR-0066). Reaching it evicts the least
+    /// recently used session rather than refusing the new one: the table is
+    /// an accelerator, not the source of truth, so an evicted client lands
+    /// back on the same member (ADR-0025).
+    ///
+    /// Zero means the default. It sits per frontend because a DNS service and
+    /// a syslog service see very different numbers of clients.
+    #[serde(default)]
+    pub udp_session_limit: u32,
 }
 
 /// Transport layer a frontend listens with.

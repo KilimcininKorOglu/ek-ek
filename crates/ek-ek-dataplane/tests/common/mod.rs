@@ -59,6 +59,7 @@ pub fn config(members: u16) -> Config {
             request_timeout_seconds: 60,
             idle_timeout_seconds: 0,
             drain_timeout_seconds: 5,
+            udp_session_limit: 0,
         }],
         backends: vec![Backend {
             id: BackendId::new("web"),

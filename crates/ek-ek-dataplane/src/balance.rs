@@ -133,6 +133,24 @@ impl Balancer {
         ring: &HashRing,
         client: IpAddr,
     ) -> Option<&'a BackendMember> {
+        // On TCP the address alone is the key: every connection from one
+        // client carries a different source port, so including it would send
+        // each connection somewhere else.
+        self.choose_by(pool, ring, client.to_string().as_bytes())
+    }
+
+    /// Chooses a member from a key the caller decides.
+    ///
+    /// The UDP path passes the client's address and port together, because a
+    /// datagram has no connection and the pair is what identifies a session
+    /// (ADR-0025). Two clients behind one NAT differ only in the port.
+    #[must_use]
+    pub fn choose_by<'a>(
+        &self,
+        pool: &'a Backend,
+        ring: &HashRing,
+        key: &[u8],
+    ) -> Option<&'a BackendMember> {
         let members = eligible(pool, &self.health);
         if members.is_empty() {
             return None;
@@ -164,7 +182,7 @@ impl Balancer {
             }
             LoadBalancingAlgorithm::SourceIpHash => {
                 let spread = by_weight(&members);
-                let at = hash(client.to_string().as_bytes()) % spread.len() as u64;
+                let at = hash(key) % spread.len() as u64;
                 spread.get(usize::try_from(at).unwrap_or(0)).copied()
             }
             LoadBalancingAlgorithm::ConsistentHash => {
@@ -175,7 +193,7 @@ impl Balancer {
                 // same list the ring was built from, and a member that is
                 // not eligible is walked past rather than looked up.
                 let enabled = enabled(pool);
-                let at = ring.pick_where(hash(client.to_string().as_bytes()), |at| {
+                let at = ring.pick_where(hash(key), |at| {
                     enabled.get(at).is_some_and(|member| {
                         self.health.is_healthy(pool.id.as_str(), member.id.as_str())
                     })

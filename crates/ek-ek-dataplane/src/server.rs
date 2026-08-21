@@ -29,6 +29,7 @@ use crate::link::AgentLink;
 use crate::live::LiveConfig;
 use crate::proxy::Proxy;
 use crate::stream::StreamProxy;
+use crate::udpproxy::{UdpProxy, udp_bindings};
 
 /// Where a frontend listens.
 ///
@@ -179,6 +180,24 @@ pub fn build(link: AgentLink) -> Result<Server> {
         }
     }
 
+    // UDP is not pingora's, so each UDP frontend runs its own loop as a
+    // background service beside the listeners pingora owns (ADR-0017).
+    for binding in udp_bindings(&live.load().config) {
+        let name = format!("udp frontend {}", binding.frontend);
+        server.add_service(background_service(
+            &name,
+            UdpService {
+                proxy: UdpProxy::new(
+                    binding.frontend,
+                    binding.address,
+                    Arc::clone(&live),
+                    Arc::clone(&status),
+                    Arc::clone(&balancer),
+                ),
+            },
+        ));
+    }
+
     status.set_state(DataPlaneState::Serving);
     // Health checking runs beside the traffic path rather than inside it, so
     // a slow probe never delays a request (T-021).
@@ -192,6 +211,33 @@ pub fn build(link: AgentLink) -> Result<Server> {
     server.add_service(background_service("node-agent link", LinkService { link }));
 
     Ok(server)
+}
+
+/// Runs one UDP frontend for as long as the server runs.
+struct UdpService {
+    proxy: UdpProxy,
+}
+
+#[async_trait]
+impl pingora::services::background::BackgroundService for UdpService {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        let (stop_sender, stop) = tokio::sync::watch::channel(false);
+        let serving = self.proxy.run(stop);
+
+        tokio::select! {
+            outcome = serving => {
+                // A UDP frontend that cannot bind is a frontend that serves
+                // nothing. Saying so beats a process that looks healthy and
+                // silently drops a service.
+                if let Err(error) = outcome {
+                    eprintln!("udp frontend could not run: {error}");
+                }
+            }
+            _ = shutdown.changed() => {
+                let _ = stop_sender.send(true);
+            }
+        }
+    }
 }
 
 /// Runs the agent link for as long as the server runs.

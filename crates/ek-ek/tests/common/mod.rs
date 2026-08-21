@@ -318,6 +318,10 @@ pub struct Document {
     pub http2: String,
     /// What the frontend does with the bytes it accepts.
     pub application: String,
+    /// Which transport the frontend carries.
+    pub transport: String,
+    /// The most UDP sessions the frontend keeps, or zero for the default.
+    pub udp_session_limit: u32,
     /// Seconds a connection may sit with no byte moving.
     pub idle_timeout_seconds: u32,
     /// The pool's health check, already rendered, or `null`.
@@ -348,6 +352,8 @@ impl Document {
             request_timeout_seconds: 5,
             http2: "enabled".to_owned(),
             application: "http".to_owned(),
+            transport: "tcp".to_owned(),
+            udp_session_limit: 0,
             idle_timeout_seconds: 0,
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
@@ -425,6 +431,21 @@ impl Document {
         self
     }
 
+    /// Makes the frontend a UDP listener.
+    #[must_use]
+    pub fn udp(mut self) -> Self {
+        self.application = "raw".to_owned();
+        self.transport = "udp".to_owned();
+        self
+    }
+
+    /// Sets the most UDP sessions the frontend keeps.
+    #[must_use]
+    pub fn udp_session_limit(mut self, limit: u32) -> Self {
+        self.udp_session_limit = limit;
+        self
+    }
+
     /// Sets how long a connection may sit with no byte moving.
     #[must_use]
     pub fn idle_timeout(mut self, seconds: u32) -> Self {
@@ -464,13 +485,15 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5,"udp_session_limit":{udp_limit}}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}],
 "certificates":[{certificates}],
 "dns_providers":[],
 "stickiness_key":"{stickiness_key}"}}"#,
             port = self.port,
             application = self.application,
+            transport = self.transport,
+            udp_limit = self.udp_session_limit,
             idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
             default_backend = self.default_backend,
@@ -638,6 +661,35 @@ impl Agent {
             .unwrap_or_default()
     }
 
+    /// What a UDP frontend's session table looks like in the last report.
+    pub async fn udp_sessions_now(&self, frontend: &str) -> Option<UdpSessionLine> {
+        let line = self
+            .reports
+            .lock()
+            .ok()
+            .and_then(|store| store.as_ref().cloned())?;
+        udp_sessions(&line)
+            .into_iter()
+            .find(|entry| entry.frontend == frontend)
+    }
+
+    /// Waits until a UDP frontend reports at least `least` sessions.
+    pub async fn wait_for_udp_sessions(
+        &self,
+        frontend: &str,
+        least: u64,
+    ) -> Option<UdpSessionLine> {
+        for _ in 0..600 {
+            if let Some(entry) = self.udp_sessions_now(frontend).await
+                && entry.count >= least
+            {
+                return Some(entry);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     /// Waits until a named counter reaches at least `least`.
     pub async fn wait_for_counter(&self, name: &str, least: u64) -> Option<u64> {
         for _ in 0..600 {
@@ -708,6 +760,213 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         self.accept.abort();
+    }
+}
+
+/// A stand-in UDP backend.
+///
+/// Answers every datagram with its own name and what it received, counts
+/// what it saw, and remembers which source addresses it saw them from. The
+/// source it sees is the proxy's own socket, not the client's, which is what
+/// makes "one socket per session" observable from the backend side.
+pub struct UdpMember {
+    /// Identity used in the configuration.
+    pub name: String,
+    /// Port it listens on.
+    pub port: u16,
+    /// How many datagrams it has answered.
+    seen: Arc<AtomicU64>,
+    /// The distinct source addresses it has been reached from.
+    sources: Arc<std::sync::Mutex<std::collections::BTreeSet<std::net::SocketAddr>>>,
+    /// Every payload it received, in order.
+    payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    accept: tokio::task::JoinHandle<()>,
+    /// The TCP listener a connect probe reaches, when this member has one.
+    tcp: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl UdpMember {
+    /// Starts a member on a free port.
+    pub async fn start(name: &str) -> Self {
+        Self::build(name, false).await
+    }
+
+    /// Starts a member that also accepts TCP on the same port.
+    ///
+    /// A TCP connect health check against a member that speaks only UDP
+    /// fails, which is how a test marks one member unhealthy without
+    /// breaking it. The member that must stay healthy needs something for
+    /// that probe to connect to.
+    pub async fn also_answering_tcp(name: &str) -> Self {
+        Self::build(name, true).await
+    }
+
+    async fn build(name: &str, with_tcp: bool) -> Self {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("a backend port must be free");
+        let port = socket
+            .local_addr()
+            .expect("the backend must have an address")
+            .port();
+
+        let seen = Arc::new(AtomicU64::new(0));
+        let sources = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let counted = Arc::clone(&seen);
+        let noted = Arc::clone(&sources);
+        let kept = Arc::clone(&payloads);
+        let identity = name.to_owned();
+
+        let accept = tokio::spawn(async move {
+            let mut buffer = vec![0_u8; 4096];
+            loop {
+                let Ok((read, from)) = socket.recv_from(&mut buffer).await else {
+                    return;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                if let Ok(mut store) = noted.lock() {
+                    store.insert(from);
+                }
+                let payload = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                if let Ok(mut store) = kept.lock() {
+                    store.push(payload.clone());
+                }
+                let answer = format!("{identity}:{payload}");
+                let _ = socket.send_to(answer.as_bytes(), from).await;
+            }
+        });
+
+        let tcp = if with_tcp {
+            let listener = TcpListener::bind(("127.0.0.1", port))
+                .await
+                .expect("the same port must be free for tcp");
+            Some(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    // Accepted and closed, which is all a connect probe asks
+                    // for.
+                    drop(stream);
+                }
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            name: name.to_owned(),
+            port,
+            seen,
+            sources,
+            payloads,
+            accept,
+            tcp,
+        }
+    }
+
+    /// How many datagrams this member has answered.
+    #[must_use]
+    pub fn seen(&self) -> u64 {
+        self.seen.load(Ordering::SeqCst)
+    }
+
+    /// How many distinct source addresses have reached it.
+    #[must_use]
+    pub fn sources(&self) -> usize {
+        self.sources.lock().map(|store| store.len()).unwrap_or(0)
+    }
+
+    /// Every payload it received.
+    #[must_use]
+    pub fn payloads(&self) -> Vec<String> {
+        self.payloads
+            .lock()
+            .map(|store| store.clone())
+            .unwrap_or_default()
+    }
+
+    /// Forgets everything it has seen.
+    pub fn reset(&self) {
+        self.seen.store(0, Ordering::SeqCst);
+        if let Ok(mut store) = self.sources.lock() {
+            store.clear();
+        }
+        if let Ok(mut store) = self.payloads.lock() {
+            store.clear();
+        }
+    }
+
+    /// Renders this member as a configuration entry.
+    #[must_use]
+    pub fn entry(&self, weight: u16, admin_state: &str) -> String {
+        format!(
+            r#"{{"id":"{}","address":"127.0.0.1","port":{},"weight":{weight},"admin_state":"{admin_state}"}}"#,
+            self.name, self.port
+        )
+    }
+}
+
+impl Drop for UdpMember {
+    fn drop(&mut self) {
+        self.accept.abort();
+        if let Some(tcp) = self.tcp.take() {
+            tcp.abort();
+        }
+    }
+}
+
+/// One client, holding its own socket so its source port stays the same.
+///
+/// A UDP session is keyed on the client's address and port, so a test that
+/// opened a new socket for every datagram would be a new client every time.
+pub struct UdpClient {
+    socket: tokio::net::UdpSocket,
+    target: std::net::SocketAddr,
+}
+
+impl UdpClient {
+    /// Opens a client pointed at a frontend.
+    pub async fn open(port: u16) -> Self {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("a client port must be free");
+        Self {
+            socket,
+            target: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        }
+    }
+
+    /// Sends one datagram and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// Fails when nothing answers within the patience window. UDP loses
+    /// datagrams, so a test that waited forever would hang rather than fail.
+    pub async fn ask(&self, payload: &str) -> std::io::Result<String> {
+        self.socket.send_to(payload.as_bytes(), self.target).await?;
+        let mut buffer = vec![0_u8; 4096];
+        let read = tokio::time::timeout(ANSWER_PATIENCE, self.socket.recv(&mut buffer))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "nothing answered the datagram",
+                )
+            })??;
+        Ok(String::from_utf8_lossy(&buffer[..read]).into_owned())
+    }
+
+    /// Sends one datagram and does not wait.
+    pub async fn tell(&self, payload: &str) {
+        let _ = self.socket.send_to(payload.as_bytes(), self.target).await;
+    }
+
+    /// Which member answered, from an answer of the form `member:payload`.
+    #[must_use]
+    pub fn member_of(answer: &str) -> String {
+        answer.split(':').next().unwrap_or_default().to_owned()
     }
 }
 
@@ -823,6 +1082,67 @@ impl Running {
                 self.data_plane.complaints()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Starts a UDP frontend and waits until it answers.
+    ///
+    /// A UDP listener cannot be probed by connecting: there is nothing to
+    /// connect to. Readiness is a datagram that comes back, and the counts
+    /// it cost the backends are reset afterwards so a test measures only its
+    /// own traffic.
+    pub async fn start_udp(document: &Document, members: &[&UdpMember]) -> Self {
+        let slot = AT_ONCE
+            .acquire()
+            .await
+            .expect("the semaphore is never closed");
+        let directory = tempfile::tempdir().expect("a temporary directory must be available");
+        let socket: PathBuf = directory.path().join("agent.sock");
+        let agent = Agent::start(&socket, document.delivery(1)).await;
+        let data_plane = DataPlane::start(&socket);
+
+        let mut running = Self {
+            agent,
+            port: document.port,
+            data_plane,
+            directory,
+            _slot: slot,
+        };
+        running.wait_until_answering().await;
+        for member in members {
+            member.reset();
+        }
+        running
+    }
+
+    /// Waits for the UDP frontend to answer a datagram, or says why it never
+    /// will.
+    async fn wait_until_answering(&mut self) {
+        let start = tokio::time::Instant::now();
+        let client = UdpClient::open(self.port).await;
+        loop {
+            client.tell("ready?").await;
+            let mut buffer = vec![0_u8; 1024];
+            if tokio::time::timeout(Duration::from_millis(200), client.socket.recv(&mut buffer))
+                .await
+                .is_ok_and(|read| read.is_ok())
+            {
+                return;
+            }
+            if let Some(status) = self.data_plane.exited() {
+                panic!(
+                    "the traffic path exited with {status} instead of serving udp on port {}; it said: {}",
+                    self.port,
+                    self.data_plane.complaints()
+                );
+            }
+            assert!(
+                start.elapsed() <= STARTUP_PATIENCE,
+                "the traffic path never answered udp on port {} (linked to the agent: {}); it said: {}",
+                self.port,
+                self.agent.is_linked(),
+                self.data_plane.complaints()
+            );
         }
     }
 
@@ -1328,6 +1648,42 @@ pub struct MemberHealthLine {
     pub healthy: bool,
     /// How many times it has changed state.
     pub transitions: u64,
+}
+
+/// One entry of a status report's UDP session list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UdpSessionLine {
+    /// The frontend holding the sessions.
+    pub frontend: String,
+    /// How many it holds right now.
+    pub count: u64,
+    /// The most it will hold.
+    pub limit: u64,
+}
+
+/// Reads the UDP session list out of a JSON line.
+fn udp_sessions(line: &str) -> Vec<UdpSessionLine> {
+    let Some(at) = line.find(r#""udp_sessions":["#) else {
+        return Vec::new();
+    };
+    let rest = &line[at + r#""udp_sessions":["#.len()..];
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
+
+    rest[..end]
+        .split("},")
+        .filter(|part| part.contains("\"frontend\""))
+        .map(|part| UdpSessionLine {
+            frontend: field(part, "frontend").unwrap_or_default(),
+            count: field(part, "count")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            limit: field(part, "limit")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        })
+        .collect()
 }
 
 /// Reads the member health list out of a JSON line.

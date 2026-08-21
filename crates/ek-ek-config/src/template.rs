@@ -730,6 +730,7 @@ fn build_website(
             request_timeout_seconds: 60,
             idle_timeout_seconds: 0,
             drain_timeout_seconds: 30,
+            udp_session_limit: 0,
         },
     );
 
@@ -769,6 +770,7 @@ fn build_website(
             request_timeout_seconds: 60,
             idle_timeout_seconds: 0,
             drain_timeout_seconds: 10,
+            udp_session_limit: 0,
         },
     );
 }
@@ -826,6 +828,7 @@ fn build_dns(config: &mut Config, created: &mut Vec<Created>, values: &Common<'_
                 request_timeout_seconds: 0,
                 idle_timeout_seconds: 0,
                 drain_timeout_seconds: 10,
+                udp_session_limit: 0,
             },
         );
     }
@@ -941,6 +944,7 @@ fn build_exchange(
             request_timeout_seconds: 60,
             idle_timeout_seconds: 0,
             drain_timeout_seconds: 60,
+            udp_session_limit: 0,
         },
     );
 
@@ -1029,6 +1033,7 @@ fn raw_frontend(
         request_timeout_seconds: 0,
         idle_timeout_seconds: 0,
         drain_timeout_seconds: 30,
+        udp_session_limit: 0,
     }
 }
 
