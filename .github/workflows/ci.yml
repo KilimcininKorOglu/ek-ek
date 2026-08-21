@@ -73,6 +73,13 @@ jobs:
       - name: Verify the preconditions
         run: make dev-verify
 
+      # The harness compiles the load generator inside the builder container as
+      # the host user. On macOS docker remaps bind mount ownership and hides a
+      # mistake there, on Linux it does not, so this job is where that path is
+      # actually proven.
+      - name: Run the integration tests
+        run: make dev-test
+
       - name: Tear the cluster down
         if: always()
         run: make dev-down

@@ -126,6 +126,10 @@ name = "ek-ek-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "ek-ek-itest"
+version = "0.1.0"
+
+[[package]]
 name = "ek-ek-store"
 version = "0.1.0"
 

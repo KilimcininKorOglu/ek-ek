@@ -1,0 +1,23 @@
+[package]
+name = "ek-ek-itest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
+description = "Integration test harness for the three node docker cluster"
+
+# Must depend on no product crate. The harness drives the cluster from outside
+# and observes it the way an operator would, so a change in a product crate can
+# never quietly change what the tests measure (ADR-0014).
+[dependencies]
+
+# Runs inside a node container, so it must not pull in anything the harness
+# needs on the host side.
+[[bin]]
+name = "ek-ek-loadgen"
+path = "src/bin/ek-ek-loadgen.rs"
+
+[lints]
+workspace = true

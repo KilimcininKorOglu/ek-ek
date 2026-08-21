@@ -47,7 +47,9 @@ deny: ## Check dependency licenses, advisories and sources
 
 .PHONY: test
 test: ## Run unit tests, never from cached results
-	$(CARGO) test --workspace --all-features --no-fail-fast
+# ek-ek-itest is excluded because it drives docker and needs a running
+# cluster. `make lint` still compiles it, so a broken harness fails here.
+	$(CARGO) test --workspace --exclude ek-ek-itest --all-features --no-fail-fast
 
 # --- Repository checks ------------------------------------------------------
 
@@ -84,6 +86,9 @@ COMPOSE := docker compose --env-file .env -f docker/compose.yml
 DATA := docker-data
 NODES := node1 node2 node3
 BACKENDS := backend1 backend2
+# The builder writes here as the host user, so the directories must exist
+# and be owned by that user before the container mounts them.
+BUILDER_DIRS := builder-cargo builder-target
 
 .PHONY: dev-env
 dev-env: ## Create .env and the docker-data directories if they are missing
@@ -94,7 +99,7 @@ dev-env: ## Create .env and the docker-data directories if they are missing
 		echo "created .env from .env.example"; \
 		echo "set EK_EK_ADMIN_PASSWORD in .env before bootstrapping a cluster"; \
 	fi
-	@mkdir -p $(addprefix $(DATA)/,$(NODES) $(BACKENDS))
+	@mkdir -p $(addprefix $(DATA)/,$(NODES) $(BACKENDS) $(BUILDER_DIRS))
 	@for b in $(BACKENDS); do \
 		if [ ! -f $(DATA)/$$b/index.html ]; then \
 			echo "$$b" > $(DATA)/$$b/index.html; \
@@ -124,7 +129,7 @@ dev-verify: dev-env ## Prove the preconditions the product depends on
 .PHONY: dev-reset
 dev-reset: ## Delete docker-data and rebuild the cluster from scratch
 	@echo "This deletes the development cluster and everything under $(DATA)/:"
-	@for d in $(NODES) $(BACKENDS); do \
+	@for d in $(NODES) $(BACKENDS) $(BUILDER_DIRS); do \
 		printf '  %s (%s)\n' "$(DATA)/$$d" "$$(du -sh $(DATA)/$$d 2>/dev/null | cut -f1 || echo missing)"; \
 	done
 	@read -r -p "Type 'sil' to confirm: " answer; \
@@ -134,10 +139,12 @@ dev-reset: ## Delete docker-data and rebuild the cluster from scratch
 	@$(MAKE) --no-print-directory dev-up
 	@echo "cluster rebuilt from scratch"
 
+# Serial on purpose: the tests share one bridge network, one VIP range and
+# one set of node containers, so running them in parallel would have them
+# tear down each other's state.
 .PHONY: dev-test
-dev-test: ## (pending) Run integration tests inside the docker environment
-	@echo "dev-test is not implemented yet"
-	@exit 1
+dev-test: dev-env ## Run integration tests against the docker environment
+	$(CARGO) test -p ek-ek-itest --all-features --no-fail-fast -- --test-threads=1
 
 # --- Reserved for later milestones ------------------------------------------
 

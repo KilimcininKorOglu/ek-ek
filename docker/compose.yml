@@ -63,22 +63,34 @@ services:
       lab:
         ipv4_address: 172.28.0.13
 
-  # Only used by the T-009 spike. It idles until a script runs a build or a
-  # measurement inside it, and it carries a cargo cache so a rebuild does not
-  # start from zero every time.
-  spike:
+  # Compiles Linux binaries for the nodes. The integration harness drives it;
+  # nothing else should. It idles until a build is asked for, and it keeps its
+  # cargo cache and target directory on bind mounts so a rebuild is incremental.
+  #
+  # Only the files cargo needs are mounted, and read only. Mounting the whole
+  # repository would pull docker-data back into the container underneath itself.
+  builder:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.spike
-    image: ek-ek-spike:latest
-    container_name: ek-ek-spike
-    hostname: spike
+      dockerfile: docker/Dockerfile.builder
+    image: ek-ek-builder:latest
+    container_name: ek-ek-builder
+    hostname: builder
     restart: "no"
     init: true
+    # The build drops to this user with setpriv, so the cargo cache and the
+    # target directory stay owned by the host and `make dev-reset` can remove
+    # them on Linux.
+    environment:
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
     volumes:
-      - ../spikes:/spike/src-tree
-      - ../docker-data/spike-cargo:/usr/local/cargo/registry
-      - ../docker-data/spike-target:/spike/target
+      - ../Cargo.toml:/src/Cargo.toml:ro
+      - ../Cargo.lock:/src/Cargo.lock:ro
+      - ../rust-toolchain.toml:/src/rust-toolchain.toml:ro
+      - ../crates:/src/crates:ro
+      - ../docker-data/builder-cargo:/cargo
+      - ../docker-data/builder-target:/target
     networks:
       lab:
         ipv4_address: 172.28.0.31

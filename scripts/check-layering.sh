@@ -28,6 +28,15 @@ RULES = [
     ("ek-ek-vrrp", "ek-ek-dataplane", "VRRP must not know about the traffic path"),
 ]
 
+# Crates that must depend on no workspace crate at all.
+#
+# The integration harness drives the cluster from outside and observes it
+# the way an operator would. Linking a product crate into it would let a
+# change in the product quietly change what the tests measure (ADR-0055).
+ISOLATED = [
+    ("ek-ek-itest", "the integration harness observes the product from outside"),
+]
+
 raw = subprocess.run(
     ["cargo", "metadata", "--no-deps", "--format-version", "1"],
     capture_output=True, text=True, check=True,
@@ -62,9 +71,17 @@ for crate, forbidden, why in RULES:
         print(f"layering violation: {crate} depends on {forbidden} ({why})")
         violations += 1
 
+for crate, why in ISOLATED:
+    if crate not in workspace:
+        continue
+    for other in sorted(workspace - {crate}):
+        if reaches(crate, other):
+            print(f"layering violation: {crate} depends on {other} ({why})")
+            violations += 1
+
 if violations:
     print(f"layering check failed: {violations} violation(s)")
     sys.exit(1)
 
-print(f"layering check passed: {len(RULES)} rule(s) hold")
+print(f"layering check passed: {len(RULES) + len(ISOLATED)} rule(s) hold")
 PY
