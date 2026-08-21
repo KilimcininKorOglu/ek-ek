@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The secret scan and the bilingual pair check both read history.
           fetch-depth: 0
@@ -38,7 +38,7 @@ jobs:
           rustc --version
 
       - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The runner must allow NET_ADMIN and NET_RAW inside containers, and
       # multicast has to cross the bridge network. If this job fails on the
@@ -73,10 +73,10 @@ jobs:
       - name: Verify the preconditions
         run: make dev-verify
 
-      # The harness compiles the load generator inside the builder container as
-      # the host user. On macOS docker remaps bind mount ownership and hides a
-      # mistake there, on Linux it does not, so this job is where that path is
-      # actually proven.
+      # The harness compiles the load generator inside the builder container
+      # and refuses to use a binary that came back owned by root. macOS
+      # remaps bind mount ownership and would hide that mistake; Linux does
+      # not, so this job is where the check has teeth.
       - name: Run the integration tests
         run: make dev-test
 

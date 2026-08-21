@@ -148,6 +148,7 @@ impl Cluster {
                 built.display()
             )));
         }
+        ensure_host_owned(&built)?;
         for (name, _) in NODES {
             let target = repo_root().join("docker-data").join(name).join(bin);
             std::fs::copy(&built, &target)
@@ -305,6 +306,36 @@ fn build_in_container(package: &str, bin: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )))
+}
+
+/// Refuses a binary the builder produced as root.
+///
+/// The build drops to the host user with `setpriv`. If that ever stops
+/// working, the cargo cache and the target directory fill with root owned
+/// files and `make dev-reset` cannot remove them. Docker on macOS remaps bind
+/// mount ownership and would hide it; on Linux this check is what catches it.
+#[cfg(unix)]
+fn ensure_host_owned(built: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // The repository is checked out by the host user, so it carries the uid the
+    // build output is supposed to have.
+    let expected = std::fs::metadata(repo_root())?.uid();
+    let actual = std::fs::metadata(built)?.uid();
+    if actual == expected {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "{} belongs to uid {actual} while the repository belongs to uid {expected}. \
+         The build did not drop to the host user, so docker-data is filling with \
+         files the host cannot remove.",
+        built.display()
+    )))
+}
+
+#[cfg(not(unix))]
+fn ensure_host_owned(_built: &Path) -> Result<()> {
+    Err(Error::new("the harness only runs on unix hosts"))
 }
 
 #[cfg(unix)]
