@@ -1,0 +1,22 @@
+{
+  "config.backend.cookie_stickiness_on_udp": "'{backend}' backend havuzu çerez tabanlı oturum sürekliliği kullanıyor, ama '{frontend}' frontend'i UDP taşıyor.",
+  "config.backend.no_members": "'{backend}' backend havuzunda hiç üye yok.",
+  "config.certificate.unknown_dns_provider": "'{certificate}' sertifikası tanımlı olmayan '{provider}' DNS sağlayıcısını gösteriyor.",
+  "config.duplicate_id": "Aynı {kind} kimliği birden fazla kez tanımlanmış: '{id}'.",
+  "config.frontend.duplicate_binding": "'{vip}' adresinin {port} portu zaten '{conflicting_frontend}' frontend'i tarafından kullanılıyor.",
+  "config.frontend.tls_without_http": "'{frontend}' frontend'i TLS ayarı taşıyor ama HTTP konuşmuyor.",
+  "config.frontend.unknown_backend": "'{frontend}' frontend'i tanımlı olmayan '{backend}' backend'ini gösteriyor.",
+  "config.frontend.unknown_certificate": "'{frontend}' frontend'i tanımlı olmayan '{certificate}' sertifikasını gösteriyor.",
+  "config.frontend.unknown_vip": "'{frontend}' frontend'i tanımlı olmayan '{vip}' VIP'ini gösteriyor.",
+  "config.health_check.timeout_above_interval": "'{backend}' backend havuzunun sağlık kontrolü zaman aşımı ({timeout_ms} ms), kontrol aralığından ({interval_ms} ms) uzun.",
+  "config.port.out_of_range": "{port} geçerli bir port numarası değil.",
+  "config.vip.in_use": "'{vip}' VIP'i {frontend_count} frontend tarafından kullanılıyor ve silinemez.",
+  "config.vip.unknown_preferred_node": "'{vip}' VIP'i tanımlı olmayan '{node}' düğümünü tercih ediyor.",
+  "dialog.delete.body": "'{name}' kalıcı olarak silinecek. {effect}",
+  "dialog.delete.cancel": "Vazgeç",
+  "dialog.delete.confirm": "Sil",
+  "dialog.delete.title": "Bu kayıt silinsin mi?",
+  "format.date.pattern": "{day}.{month}.{year}",
+  "format.datetime.pattern": "{day}.{month}.{year} {hour}:{minute}",
+  "format.number.group_separator": "."
+}

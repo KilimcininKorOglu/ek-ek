@@ -11,11 +11,15 @@ description = "Configuration domain model, serialisation and validation"
 # This crate must never depend on another workspace crate (ADR-0014).
 [dependencies]
 serde = { workspace = true }
-
-# The concrete wire format belongs to the store, not to the model. JSON is
-# used here only to prove that a config survives a serialisation round trip.
-[dev-dependencies]
+# The config document's wire format belongs to the store, not to the model.
+# JSON is a dependency here for a different reason: the translation catalogue
+# is JSON by decision (ADR-0015) and is read at startup.
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The locales checker is aimed at a catalogue built on purpose to be wrong,
+# so the tests need somewhere to build one.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

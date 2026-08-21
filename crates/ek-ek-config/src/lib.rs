@@ -36,6 +36,7 @@ pub mod certificate;
 pub mod config;
 pub mod frontend;
 pub mod health;
+pub mod i18n;
 pub mod id;
 pub mod node;
 pub mod validation;
@@ -55,6 +56,7 @@ pub use frontend::{
     TlsSettings, TransportProtocol,
 };
 pub use health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
+pub use i18n::{Catalog, Dialog, DialogKeys};
 pub use id::{
     BackendId, CertificateId, DnsProviderId, FrontendId, MemberId, NodeId, SecretId, VipId,
 };

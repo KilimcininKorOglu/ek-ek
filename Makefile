@@ -73,8 +73,12 @@ check-secrets: ## Refuse credentials in tracked files
 check-layering: ## Enforce the crate dependency direction
 	$(SCRIPTS)/check-layering.sh
 
+.PHONY: check-locales
+check-locales: ## Verify every language file carries the same keys
+	$(SCRIPTS)/check-locales.sh
+
 .PHONY: ci
-ci: fmt-check lint deny check-headers check-apis check-docs check-secrets check-layering test ## Run every check CI runs
+ci: fmt-check lint deny check-headers check-apis check-docs check-secrets check-layering check-locales test ## Run every check CI runs
 	@echo "ci: all checks passed"
 
 # --- Development environment ------------------------------------------------
