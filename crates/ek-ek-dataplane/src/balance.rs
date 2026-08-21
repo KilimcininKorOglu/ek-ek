@@ -58,10 +58,20 @@ pub struct Balancer {
 /// the caller answers rather than forwarding to a member known to be down
 /// (ADR-0062).
 fn eligible<'a>(pool: &'a Backend, health: &Health) -> Vec<&'a BackendMember> {
+    enabled(pool)
+        .into_iter()
+        .filter(|member| health.is_healthy(pool.id.as_str(), member.id.as_str()))
+        .collect()
+}
+
+/// The members an operator has left in service, in configuration order.
+///
+/// This is the list the consistent hashing ring is built from, so an index
+/// the ring returns addresses this list and no other.
+fn enabled(pool: &Backend) -> Vec<&BackendMember> {
     pool.members
         .iter()
         .filter(|member| member.admin_state == AdminState::Enabled)
-        .filter(|member| health.is_healthy(pool.id.as_str(), member.id.as_str()))
         .collect()
 }
 
@@ -147,10 +157,19 @@ impl Balancer {
                 spread.get(usize::try_from(at).unwrap_or(0)).copied()
             }
             LoadBalancingAlgorithm::ConsistentHash => {
-                // The ring is built from the same eligible list, so an index
-                // out of it addresses this list.
-                let at = ring.pick(hash(client.to_string().as_bytes()))?;
-                members.get(at).copied()
+                // The ring indexes the administratively enabled members, not
+                // the eligible ones: health is left out of it on purpose, so
+                // a probe result does not move clients that had no reason to
+                // move. That means the index has to be resolved against the
+                // same list the ring was built from, and a member that is
+                // not eligible is walked past rather than looked up.
+                let enabled = enabled(pool);
+                let at = ring.pick_where(hash(client.to_string().as_bytes()), |at| {
+                    enabled.get(at).is_some_and(|member| {
+                        self.health.is_healthy(pool.id.as_str(), member.id.as_str())
+                    })
+                })?;
+                enabled.get(at).copied()
             }
         }
     }
@@ -243,11 +262,7 @@ pub fn ring_for(pool: &Backend) -> HashRing {
     // Built from the administrative state only. Health changes far more often
     // than configuration, and rebuilding the ring on every probe would move
     // clients that had no reason to move.
-    let members: Vec<&BackendMember> = pool
-        .members
-        .iter()
-        .filter(|member| member.admin_state == AdminState::Enabled)
-        .collect();
+    let members = enabled(pool);
     let identities: Vec<&str> = members.iter().map(|member| member.id.as_str()).collect();
     HashRing::build(&identities)
 }

@@ -79,10 +79,24 @@ impl HashRing {
     /// which is what makes a removal cost only the removed member's share.
     #[must_use]
     pub fn pick(&self, key: u64) -> Option<usize> {
+        self.pick_where(key, |_| true)
+    }
+
+    /// Picks the first member from the key's position that is acceptable.
+    ///
+    /// A member that cannot take traffic right now is skipped rather than
+    /// removed from the ring. Rebuilding the ring would move clients that
+    /// had no reason to move; walking past the member moves only the share
+    /// that was going to it, which is the whole point of the ring.
+    #[must_use]
+    pub fn pick_where(&self, key: u64, acceptable: impl Fn(usize) -> bool) -> Option<usize> {
+        // The wrap is a second pass over the front of the ring, so a key
+        // past the last point is answered by the first acceptable member
+        // rather than by nobody.
         self.points
             .range(key..)
-            .next()
-            .or_else(|| self.points.iter().next())
+            .chain(self.points.iter())
             .map(|(_, at)| *at)
+            .find(|at| acceptable(*at))
     }
 }

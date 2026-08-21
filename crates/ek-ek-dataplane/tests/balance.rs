@@ -19,9 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 
 use ek_ek_config::{
-    AdminState, Backend, BackendId, BackendMember, ConnectionPooling, LoadBalancingAlgorithm,
-    MemberId, SessionStickiness,
+    AdminState, Backend, BackendId, BackendMember, ConnectionPooling, HealthCheck, HealthProbe,
+    LoadBalancingAlgorithm, MemberId, SessionStickiness,
 };
+use ek_ek_dataplane::health::Health;
 use ek_ek_dataplane::{Balancer, ring_for};
 
 /// Builds a pool from `(identity, weight, state)` triples.
@@ -384,4 +385,126 @@ fn the_hash_does_not_change_between_runs() {
     assert_eq!(ek_ek_dataplane::hash(b""), 0xcbf2_9ce4_8422_2325);
     assert_eq!(ek_ek_dataplane::hash(b"a"), 0xaf63_dc4c_8601_ec8c);
     assert_eq!(ek_ek_dataplane::hash(b"foobar"), 0x85944171f73967e8);
+}
+
+/// Marks a member unhealthy in a table a balancer can be built around.
+fn without(pool: &Backend, member: &str) -> std::sync::Arc<Health> {
+    let health = std::sync::Arc::new(Health::new());
+    let check = HealthCheck {
+        probe: HealthProbe::TcpConnect,
+        interval_ms: 1_000,
+        timeout_ms: 500,
+        healthy_threshold: 1,
+        unhealthy_threshold: 1,
+    };
+    health.record(pool.id.as_str(), member, &check, false);
+    assert!(
+        !health.is_healthy(pool.id.as_str(), member),
+        "the member must be out before the pool is measured"
+    );
+    health
+}
+
+/// Which member each of `count` clients is sent to.
+fn placements(
+    balancer: &Balancer,
+    pool: &Backend,
+    ring: &ek_ek_dataplane::HashRing,
+    count: u32,
+) -> BTreeMap<u32, Option<String>> {
+    (1..=count)
+        .map(|number| {
+            let chosen = balancer
+                .choose(pool, ring, client(number))
+                .map(|member| member.id.as_str().to_owned());
+            (number, chosen)
+        })
+        .collect()
+}
+
+#[test]
+fn consistent_hash_answers_every_client_when_one_member_is_unhealthy() {
+    // The ring is built from the enabled members and health is left out of
+    // it, so the index it returns addresses the enabled list. Resolving that
+    // index against the shorter eligible list picks the wrong member, and
+    // past its end picks nobody at all.
+    let pool = pool(
+        LoadBalancingAlgorithm::ConsistentHash,
+        &[
+            ("one", 1, AdminState::Enabled),
+            ("two", 1, AdminState::Enabled),
+            ("three", 1, AdminState::Enabled),
+        ],
+    );
+    let ring = ring_for(&pool);
+    let balancer = Balancer::with_health(without(&pool, "three"));
+
+    let placed = placements(&balancer, &pool, &ring, 300);
+
+    let unanswered = placed.values().filter(|chosen| chosen.is_none()).count();
+    assert_eq!(
+        unanswered, 0,
+        "{unanswered} of 300 clients were sent nowhere while two members were healthy"
+    );
+    let to_dead = placed
+        .values()
+        .flatten()
+        .filter(|name| name.as_str() == "three")
+        .count();
+    assert_eq!(to_dead, 0, "{to_dead} clients were sent to a dead member");
+}
+
+#[test]
+fn consistent_hash_moves_only_the_clients_of_the_member_that_went_unhealthy() {
+    let pool = pool(
+        LoadBalancingAlgorithm::ConsistentHash,
+        &[
+            ("one", 1, AdminState::Enabled),
+            ("two", 1, AdminState::Enabled),
+            ("three", 1, AdminState::Enabled),
+        ],
+    );
+    let ring = ring_for(&pool);
+
+    let before = placements(&Balancer::new(), &pool, &ring, 300);
+    let after = placements(
+        &Balancer::with_health(without(&pool, "three")),
+        &pool,
+        &ring,
+        300,
+    );
+
+    let was_on_three = before
+        .iter()
+        .filter(|(_, chosen)| chosen.as_deref() == Some("three"))
+        .count();
+    assert!(
+        was_on_three > 0,
+        "no client was on the member that went unhealthy, so nothing was measured"
+    );
+
+    let moved: Vec<u32> = before
+        .iter()
+        .filter(|(number, chosen)| {
+            chosen.as_deref() != Some("three") && after.get(number) != Some(*chosen)
+        })
+        .map(|(number, _)| *number)
+        .collect();
+    assert!(
+        moved.is_empty(),
+        "{} clients moved that were not on the unhealthy member: {moved:?}",
+        moved.len()
+    );
+
+    let landed_elsewhere = before
+        .iter()
+        .filter(|(number, chosen)| {
+            chosen.as_deref() == Some("three")
+                && after.get(number).and_then(Option::as_deref).is_some()
+        })
+        .count();
+    assert_eq!(
+        landed_elsewhere, was_on_three,
+        "not every client of the unhealthy member was placed again"
+    );
 }
