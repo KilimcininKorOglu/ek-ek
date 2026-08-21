@@ -123,7 +123,98 @@ def check(tasks: list[dict[str, object]]) -> list[str]:
                     f"{task['path'].name}: marked bitti but {dep} is '{dep_task['durum']}'"
                 )
 
+    problems.extend(check_milestone_order(tasks))
+
     return problems
+
+
+def milestone_number(task: dict[str, object]) -> int:
+    """M7 -> 7. An unparseable milestone sorts last rather than crashing."""
+    raw = str(task["milestone"]).strip()
+    return int(raw[1:]) if raw[:1] == "M" and raw[1:].isdigit() else 999
+
+
+def check_milestone_order(tasks: list[dict[str, object]]) -> list[str]:
+    """No milestone may be started while an earlier one still has open work.
+
+    The dependency check does not catch this. A task nothing depends on blocks
+    nobody, so it drifts across milestones without ever failing anything.
+
+    M1 is exempt: the roadmap runs the risk spikes early on purpose.
+    """
+    problems: list[str] = []
+    open_before: dict[int, list[str]] = {}
+
+    for task in sorted(tasks, key=milestone_number):
+        number = milestone_number(task)
+        if task["durum"] != "bitti":
+            open_before.setdefault(number, []).append(str(task["id"]))
+
+    for task in tasks:
+        if task["durum"] != "bitti":
+            continue
+        number = milestone_number(task)
+        if number == 1:
+            continue
+        blocking = [
+            f"{tid} (M{earlier})"
+            for earlier, ids in sorted(open_before.items())
+            if earlier < number and earlier != 1
+            for tid in ids
+        ]
+        if blocking:
+            problems.append(
+                f"{task['path'].name}: bitti in M{number} while an earlier "
+                f"milestone is still open: {', '.join(blocking)}"
+            )
+    return problems
+
+
+def milestone_gaps(tasks: list[dict[str, object]]) -> list[str]:
+    """Report a task scheduled long after everything it needs is ready.
+
+    A gap is not automatically wrong, so this warns instead of failing. It
+    exists because nothing else surfaces the question at all.
+    """
+    by_id = {str(t["id"]): t for t in tasks}
+    notes: list[str] = []
+    for task in sorted(tasks, key=lambda t: str(t["id"])):
+        deps = [by_id[d] for d in task.get("bagimlilik", []) if d in by_id]
+        if not deps:
+            continue
+        ready = max(milestone_number(d) for d in deps)
+        gap = milestone_number(task) - ready
+        if gap >= 4:
+            notes.append(
+                f"{task['id']} sits in M{milestone_number(task)} but everything "
+                f"it needs is ready by M{ready} (gap {gap}): {task['baslik']}"
+            )
+    return notes
+
+
+def execution_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Milestone first, then dependencies, then id.
+
+    Sorting by id alone produced an index whose last rows were M3 and M2 tasks,
+    which is not an order anyone executes.
+    """
+    remaining = sorted(tasks, key=lambda t: (milestone_number(t), str(t["id"])))
+    placed: set[str] = set()
+    ordered: list[dict[str, object]] = []
+
+    while remaining:
+        ready = [
+            t
+            for t in remaining
+            if all(d in placed for d in t.get("bagimlilik", []) if any(str(x["id"]) == d for x in tasks))
+        ]
+        # A cycle would leave nothing ready. The graph is checked elsewhere, so
+        # fall back to the head rather than looping forever.
+        chosen = ready[0] if ready else remaining[0]
+        ordered.append(chosen)
+        placed.add(str(chosen["id"]))
+        remaining.remove(chosen)
+    return ordered
 
 
 def render(tasks: list[dict[str, object]]) -> str:
@@ -135,7 +226,7 @@ def render(tasks: list[dict[str, object]]) -> str:
             str(t["durum"]),
             ", ".join(t.get("bagimlilik", [])),
         ]
-        for t in sorted(tasks, key=lambda t: str(t["id"]))
+        for t in execution_order(tasks)
     ]
 
     widths = [
@@ -185,6 +276,11 @@ def main() -> int:
                 print(f"plan: {problem}")
             print(f"plan check failed: {len(problems)} problem(s)")
             return 1
+
+        # Warnings, not failures: a long gap can be deliberate. Printing it is
+        # the only way the question gets asked at all.
+        for note in milestone_gaps(tasks):
+            print(f"plan warning: {note}")
 
         if args.check:
             print(f"plan check passed: {len(tasks)} task(s)")

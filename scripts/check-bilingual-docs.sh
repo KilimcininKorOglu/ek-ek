@@ -17,6 +17,8 @@ readonly BASE="${1:-HEAD~1}"
 readonly PAIRS=(
     "README.md:README.tr.md"
     "LICENSE-COMMERCIAL.md:LICENSE-COMMERCIAL.tr.md"
+    "CLA.md:CLA.tr.md"
+    "CONTRIBUTING.md:CONTRIBUTING.tr.md"
 )
 
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then

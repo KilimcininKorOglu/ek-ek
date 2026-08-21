@@ -47,4 +47,6 @@ Yalnızca Linux. Hedef dağıtımlar Debian, Ubuntu ve RHEL ailesi.
 
 ## Katkı
 
-CLA süreci kurulana kadar dış katkı kabul edilmez. Çift lisans modeli telif hakkının tek elde toplanmasını gerektirir ve imzasız birleştirilen bir katkı bu modeli geri dönülmez biçimde bozar.
+Akış ve bir pull request'in geçmesi gereken denetimler için [CONTRIBUTING.tr.md](CONTRIBUTING.tr.md) dosyasına bakın.
+
+Her pull request için imzalanmış bir [Katkıda Bulunan Lisans Sözleşmesi](CLA.tr.md) gerekir. Çift lisans modeli telif hakkının tek elde toplanmasını gerektirir ve imzasız birleştirilen bir katkı bu modeli geri dönülmez biçimde bozar; bu yüzden otomatik bir denetim bunu zorlar.

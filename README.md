@@ -47,4 +47,6 @@ Dual licensed:
 
 ## Contributing
 
-External contributions are not accepted until a CLA process is in place. The dual license model requires copyright to be held by a single party, and merging an unsigned contribution would break that model irreversibly.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the checks a pull request has to pass.
+
+Every pull request needs a signed [Contributor License Agreement](CLA.md). The dual license model requires the copyright to be held by a single party, and merging an unsigned contribution would break that model irreversibly, so an automated check enforces it.
