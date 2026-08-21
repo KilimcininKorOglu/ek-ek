@@ -80,3 +80,9 @@ identifier! {
     /// secret. It carries this reference and the store resolves it.
     SecretId
 }
+
+identifier! {
+    /// Identifies a template, whether it ships with the product or an
+    /// operator saved it from a working config.
+    TemplateId
+}

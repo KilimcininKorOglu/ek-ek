@@ -73,11 +73,20 @@ pub enum ErrorCode {
     /// A health check would still be waiting when the next probe is due.
     #[serde(rename = "config.health_check.timeout_above_interval")]
     HealthCheckTimeoutAboveInterval,
+    /// A template was applied without a value it requires.
+    #[serde(rename = "template.parameter.missing")]
+    TemplateParameterMissing,
+    /// A template parameter was given a value of the wrong kind.
+    #[serde(rename = "template.parameter.wrong_kind")]
+    TemplateParameterWrongKind,
+    /// A template was applied with a value nothing in it declares.
+    #[serde(rename = "template.parameter.unknown")]
+    TemplateParameterUnknown,
 }
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -91,6 +100,9 @@ impl ErrorCode {
         Self::BackendCookieStickinessOnUdp,
         Self::PortOutOfRange,
         Self::HealthCheckTimeoutAboveInterval,
+        Self::TemplateParameterMissing,
+        Self::TemplateParameterWrongKind,
+        Self::TemplateParameterUnknown,
     ];
 
     /// Returns the translation key this code is looked up under.
@@ -110,6 +122,9 @@ impl ErrorCode {
             Self::BackendCookieStickinessOnUdp => "config.backend.cookie_stickiness_on_udp",
             Self::PortOutOfRange => "config.port.out_of_range",
             Self::HealthCheckTimeoutAboveInterval => "config.health_check.timeout_above_interval",
+            Self::TemplateParameterMissing => "template.parameter.missing",
+            Self::TemplateParameterWrongKind => "template.parameter.wrong_kind",
+            Self::TemplateParameterUnknown => "template.parameter.unknown",
         }
     }
 }
@@ -216,7 +231,7 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    fn new(code: ErrorCode, path: FieldPath) -> Self {
+    pub(crate) fn new(code: ErrorCode, path: FieldPath) -> Self {
         Self {
             code,
             path,
@@ -224,7 +239,7 @@ impl ValidationError {
         }
     }
 
-    fn with_id(mut self, name: &str, value: &str) -> Self {
+    pub(crate) fn with_id(mut self, name: &str, value: &str) -> Self {
         self.parameters.insert(
             name.to_owned(),
             ParameterValue::Identifier(value.to_owned()),
@@ -232,7 +247,7 @@ impl ValidationError {
         self
     }
 
-    fn with_number(mut self, name: &str, value: i64) -> Self {
+    pub(crate) fn with_number(mut self, name: &str, value: i64) -> Self {
         self.parameters
             .insert(name.to_owned(), ParameterValue::Number(value));
         self
@@ -245,6 +260,11 @@ impl ValidationError {
 pub struct ValidationErrors(Vec<ValidationError>);
 
 impl ValidationErrors {
+    /// Gathers errors found outside this module, such as by a template.
+    pub(crate) fn from_errors(errors: Vec<ValidationError>) -> Self {
+        Self(errors)
+    }
+
     /// Borrows the collected errors.
     #[must_use]
     pub fn as_slice(&self) -> &[ValidationError] {

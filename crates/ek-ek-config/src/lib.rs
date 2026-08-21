@@ -39,6 +39,7 @@ pub mod health;
 pub mod i18n;
 pub mod id;
 pub mod node;
+pub mod template;
 pub mod validation;
 pub mod vip;
 
@@ -58,9 +59,14 @@ pub use frontend::{
 pub use health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
 pub use i18n::{Catalog, Dialog, DialogKeys};
 pub use id::{
-    BackendId, CertificateId, DnsProviderId, FrontendId, MemberId, NodeId, SecretId, VipId,
+    BackendId, CertificateId, DnsProviderId, FrontendId, MemberId, NodeId, SecretId, TemplateId,
+    VipId,
 };
 pub use node::{Node, NodeRole};
+pub use template::{
+    Applied, Argument, Arguments, Created, CreatedKind, Parameter, ParameterKind, Template,
+    UserTemplate, Verification, apply, embedded, embedded_by_id, from_frontend, undo,
+};
 pub use validation::{
     ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors, validate,
     validate_vip_removal,
