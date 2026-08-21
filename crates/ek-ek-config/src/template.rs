@@ -996,6 +996,7 @@ fn banner_check(expected: &str) -> HealthCheck {
         probe: HealthProbe::SendExpect {
             send: ProbePayload::Text("\r\n".to_owned()),
             expect: ProbePayload::Text(expected.to_owned()),
+            transport: TransportProtocol::Tcp,
         },
         interval_ms: 10_000,
         timeout_ms: 5_000,

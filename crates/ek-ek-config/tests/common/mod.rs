@@ -281,6 +281,7 @@ pub fn passthrough_backend() -> Backend {
             probe: HealthProbe::SendExpect {
                 send: ProbePayload::Text("a001 CAPABILITY\r\n".to_owned()),
                 expect: ProbePayload::Hex("2a204f4b".to_owned()),
+                transport: TransportProtocol::Tcp,
             },
             interval_ms: 5000,
             timeout_ms: 2000,

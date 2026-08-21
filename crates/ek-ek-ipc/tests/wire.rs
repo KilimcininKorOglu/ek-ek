@@ -11,8 +11,8 @@
 
 use ek_ek_config::{Config, SchemaVersion};
 use ek_ek_ipc::{
-    AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, OpenConnections,
-    StatusReport, decode, encode,
+    AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, MemberHealth,
+    OpenConnections, StatusReport, decode, encode,
 };
 
 fn empty_config() -> Config {
@@ -53,6 +53,12 @@ fn a_message_survives_a_round_trip() {
             pool: "pool-web".to_owned(),
             member: "web-1".to_owned(),
             count: 7,
+        }],
+        member_health: vec![MemberHealth {
+            pool: "pool-web".to_owned(),
+            member: "web-1".to_owned(),
+            healthy: false,
+            transitions: 4,
         }],
     });
     let line = encode(&report).expect("it must encode");
@@ -112,6 +118,7 @@ fn the_two_directions_do_not_read_as_each_other() {
         state: DataPlaneState::Starting,
         counters: Counters::default(),
         open_connections: Vec::new(),
+        member_health: Vec::new(),
     }))
     .expect("it must encode");
 

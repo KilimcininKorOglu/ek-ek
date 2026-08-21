@@ -196,6 +196,12 @@ impl Status {
                 .as_ref()
                 .map(|balancer| balancer.report())
                 .unwrap_or_default(),
+            member_health: self
+                .balancer
+                .load()
+                .as_ref()
+                .map(|balancer| balancer.health().report())
+                .unwrap_or_default(),
         }
     }
 }

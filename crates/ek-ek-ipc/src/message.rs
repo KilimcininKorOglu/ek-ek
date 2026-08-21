@@ -111,6 +111,25 @@ pub struct OpenConnections {
     pub count: u64,
 }
 
+/// What one member's health check says, and how often it has changed
+/// (ADR-0063).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberHealth {
+    /// The pool the member belongs to.
+    pub pool: String,
+    /// The member itself.
+    pub member: String,
+    /// Whether it is currently taking traffic.
+    pub healthy: bool,
+    /// How many times it has changed state since the process started.
+    ///
+    /// Two reports can both say healthy while the member went down and came
+    /// back in between. This is what makes that visible, so a member that
+    /// keeps flapping can be told from one that is simply up.
+    pub transitions: u64,
+}
+
 /// A periodic report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,6 +148,14 @@ pub struct StatusReport {
     /// it. Defaulted so a release that does not send it still reads.
     #[serde(default)]
     pub open_connections: Vec<OpenConnections>,
+    /// Health of every member that has a health check (ADR-0063).
+    ///
+    /// The whole state travels in every report rather than an event at the
+    /// moment of a transition, because an event is lost when the link drops
+    /// and the agent would then be blind until the next one. Members of a
+    /// pool with no health check are left out: health does not exist there.
+    #[serde(default)]
+    pub member_health: Vec<MemberHealth>,
 }
 
 /// Why a delivered configuration was not applied.

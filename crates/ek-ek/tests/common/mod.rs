@@ -22,7 +22,15 @@ use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::broadcast;
 
 /// How long a test waits for the binary to start listening.
-const STARTUP_PATIENCE: Duration = Duration::from_secs(20);
+const STARTUP_PATIENCE: Duration = Duration::from_secs(30);
+
+/// How many copies of the binary may be starting at once.
+///
+/// Each one brings up a pingora server with its own worker threads. Letting
+/// every test in a file start one at the same moment makes them all slow
+/// enough to miss the startup window, which then reads as a product fault
+/// rather than as a loaded machine.
+static AT_ONCE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// How long one request may take before the test calls it a failure.
 ///
@@ -31,16 +39,30 @@ const STARTUP_PATIENCE: Duration = Duration::from_secs(20);
 /// nothing measures.
 const ANSWER_PATIENCE: Duration = Duration::from_secs(15);
 
-/// A port nothing is listening on, released before somebody takes it.
+/// Where this test binary's own port range starts.
+///
+/// Derived from the process id so two test binaries running at once do not
+/// hand out the same numbers.
+static NEXT_PORT: AtomicU64 = AtomicU64::new(0);
+
+/// A port nothing is listening on.
+///
+/// Walks a range of its own rather than asking the kernel for any free port.
+/// The kernel's answer has to be released before the binary under test can
+/// bind it, and in that gap a parallel test takes it: the binary then fails
+/// to bind, exits, and the test reads it as a product fault.
 #[must_use]
 pub fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port must be free");
-    let port = listener
-        .local_addr()
-        .expect("the listener must have an address")
-        .port();
-    drop(listener);
-    port
+    let base = 20_000 + u64::from(std::process::id() % 400) * 100;
+    loop {
+        let at = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+        let port = u16::try_from(base + at % 100).unwrap_or(20_000);
+        // Bound and released only to prove nothing else holds it. Two callers
+        // never get the same number, so the gap that matters does not exist.
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// How a stand-in backend behaves.
@@ -67,6 +89,10 @@ pub struct Member {
     pub port: u16,
     /// How many requests it has answered.
     hits: Arc<AtomicU64>,
+    /// How many health probes it has answered.
+    probes: Arc<AtomicU64>,
+    /// Whether it is still answering at all.
+    alive: Arc<AtomicBool>,
     accept: tokio::task::JoinHandle<()>,
 }
 
@@ -87,7 +113,11 @@ impl Member {
             .port();
 
         let hits = Arc::new(AtomicU64::new(0));
+        let probes = Arc::new(AtomicU64::new(0));
+        let alive = Arc::new(AtomicBool::new(true));
         let counted = Arc::clone(&hits);
+        let probed = Arc::clone(&probes);
+        let answering = Arc::clone(&alive);
         let identity = name.to_owned();
 
         let accept = tokio::spawn(async move {
@@ -97,6 +127,8 @@ impl Member {
                 };
                 let identity = identity.clone();
                 let counted = Arc::clone(&counted);
+                let probed = Arc::clone(&probed);
+                let answering = Arc::clone(&answering);
 
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
@@ -108,6 +140,7 @@ impl Member {
                         let mut forwarded_for = String::new();
                         let mut forwarded_proto = String::new();
                         let mut saw_request = false;
+                        let mut is_probe = false;
 
                         loop {
                             let Ok(Some(line)) = lines.next_line().await else {
@@ -131,8 +164,22 @@ impl Member {
                             if let Some(value) = lowered.strip_prefix("x-forwarded-proto:") {
                                 forwarded_proto = value.trim().to_owned();
                             }
+                            // Health traffic names itself, which is the only
+                            // reason a backend can tell it from a real
+                            // request in its own log.
+                            if lowered.starts_with("user-agent:")
+                                && lowered.contains("ek-ek-health/")
+                            {
+                                is_probe = true;
+                            }
                         }
                         if !saw_request {
+                            return;
+                        }
+
+                        // A member that has been stopped accepts and says
+                        // nothing, which is what a hung service looks like.
+                        if !answering.load(Ordering::SeqCst) {
                             return;
                         }
 
@@ -148,7 +195,11 @@ impl Member {
                             }
                         }
 
-                        counted.fetch_add(1, Ordering::SeqCst);
+                        if is_probe {
+                            probed.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                        }
                         let body = format!(
                             "member={identity}\nforwarded_for={forwarded_for}\nforwarded_proto={forwarded_proto}\n"
                         );
@@ -168,8 +219,30 @@ impl Member {
             name: name.to_owned(),
             port,
             hits,
+            probes,
+            alive,
             accept,
         }
+    }
+
+    /// How many health probes this member has answered.
+    #[must_use]
+    pub fn probes(&self) -> u64 {
+        self.probes.load(Ordering::SeqCst)
+    }
+
+    /// Stops answering, without closing the listening socket.
+    ///
+    /// This is what a hung service looks like: the connection is accepted and
+    /// then nothing comes back, which a TCP connect probe cannot see but an
+    /// HTTP probe can.
+    pub fn stop_answering(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
+    /// Starts answering again.
+    pub fn answer_again(&self) {
+        self.alive.store(true, Ordering::SeqCst);
     }
 
     /// How many requests this member has answered.
@@ -217,6 +290,8 @@ pub struct Document {
     pub application: String,
     /// Seconds a connection may sit with no byte moving.
     pub idle_timeout_seconds: u32,
+    /// The pool's health check, already rendered, or `null`.
+    pub health_check: String,
     /// Rules, already rendered.
     pub routing_rules: Vec<String>,
     /// Pool used when no rule matches, or nothing.
@@ -236,6 +311,7 @@ impl Document {
             http2: "enabled".to_owned(),
             application: "http".to_owned(),
             idle_timeout_seconds: 0,
+            health_check: "null".to_owned(),
             routing_rules: Vec::new(),
             default_backend: r#""web""#.to_owned(),
         }
@@ -283,6 +359,31 @@ impl Document {
         self
     }
 
+    /// Gives the pool a TCP connect health check.
+    #[must_use]
+    pub fn tcp_health_check(
+        mut self,
+        interval_ms: u32,
+        timeout_ms: u32,
+        healthy: u8,
+        unhealthy: u8,
+    ) -> Self {
+        self.health_check = format!(
+            r#"{{"probe":{{"type":"tcp_connect"}},"interval_ms":{interval_ms},"timeout_ms":{timeout_ms},"healthy_threshold":{healthy},"unhealthy_threshold":{unhealthy}}}"#
+        );
+        self
+    }
+
+    /// Gives the pool an HTTP health check.
+    #[must_use]
+    pub fn http_health_check(mut self, path: &str, status: u16, interval_ms: u32) -> Self {
+        self.health_check = format!(
+            r#"{{"probe":{{"type":"http","path":"{path}","expected_status":[{status}],"expected_body":null,"host_header":null}},"interval_ms":{interval_ms},"timeout_ms":{},"healthy_threshold":1,"unhealthy_threshold":1}}"#,
+            interval_ms / 2
+        );
+        self
+    }
+
     /// Renders the document.
     #[must_use]
     pub fn render(&self) -> String {
@@ -291,7 +392,7 @@ impl Document {
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
 "frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"{application}","tls":null,"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5}}],
-"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":null,"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}],
+"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}],
 "certificates":[],
 "dns_providers":[]}}"#,
             port = self.port,
@@ -304,6 +405,7 @@ impl Document {
             request = self.request_timeout_seconds,
             members = self.members.join(","),
             algorithm = self.algorithm,
+            health_check = self.health_check,
         )
         .replace('\n', "")
     }
@@ -424,6 +526,40 @@ impl Agent {
         None
     }
 
+    /// Waits until a member is reported with the health asked for.
+    ///
+    /// Returns how many transitions it had by then, so a test can tell a
+    /// member that settled from one that keeps flapping.
+    pub async fn wait_for_health(&self, member: &str, healthy: bool) -> Option<u64> {
+        for _ in 0..600 {
+            let line = self
+                .reports
+                .lock()
+                .ok()
+                .and_then(|store| store.as_ref().cloned());
+            if let Some(line) = line
+                && let Some(entry) = member_health(&line)
+                    .into_iter()
+                    .find(|entry| entry.member == member)
+                && entry.healthy == healthy
+            {
+                return Some(entry.transitions);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// Returns the health entries of the last report.
+    pub async fn health_now(&self) -> Vec<MemberHealthLine> {
+        self.reports
+            .lock()
+            .ok()
+            .and_then(|store| store.as_ref().cloned())
+            .map(|line| member_health(&line))
+            .unwrap_or_default()
+    }
+
     /// Waits until a named counter reaches at least `least`.
     pub async fn wait_for_counter(&self, name: &str, least: u64) -> Option<u64> {
         for _ in 0..600 {
@@ -526,11 +662,17 @@ pub struct Running {
     pub port: u16,
     data_plane: DataPlane,
     directory: tempfile::TempDir,
+    /// Held for as long as the binary runs, so only a few run at once.
+    _slot: tokio::sync::SemaphorePermit<'static>,
 }
 
 impl Running {
     /// Starts the binary serving one document and waits until it listens.
     pub async fn start(document: &Document) -> Self {
+        let slot = AT_ONCE
+            .acquire()
+            .await
+            .expect("the semaphore is never closed");
         let directory = tempfile::tempdir().expect("a temporary directory must be available");
         let socket: PathBuf = directory.path().join("agent.sock");
         let agent = Agent::start(&socket, document.delivery(1)).await;
@@ -541,6 +683,7 @@ impl Running {
             port: document.port,
             data_plane,
             directory,
+            _slot: slot,
         };
         drop(connect(running.port).await);
         running
@@ -983,6 +1126,43 @@ fn open_connections(line: &str) -> Vec<Open> {
             pool: field(part, "pool").unwrap_or_default(),
             member: field(part, "member").unwrap_or_default(),
             count: field(part, "count")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        })
+        .collect()
+}
+
+/// One entry of a status report's member health list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberHealthLine {
+    /// The pool the member belongs to.
+    pub pool: String,
+    /// The member itself.
+    pub member: String,
+    /// Whether it is taking traffic.
+    pub healthy: bool,
+    /// How many times it has changed state.
+    pub transitions: u64,
+}
+
+/// Reads the member health list out of a JSON line.
+fn member_health(line: &str) -> Vec<MemberHealthLine> {
+    let Some(at) = line.find(r#""member_health":["#) else {
+        return Vec::new();
+    };
+    let rest = &line[at + r#""member_health":["#.len()..];
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
+
+    rest[..end]
+        .split("},")
+        .filter(|part| part.contains("\"member\""))
+        .map(|part| MemberHealthLine {
+            pool: field(part, "pool").unwrap_or_default(),
+            member: field(part, "member").unwrap_or_default(),
+            healthy: part.contains(r#""healthy":true"#),
+            transitions: field(part, "transitions")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
         })

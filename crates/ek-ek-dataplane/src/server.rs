@@ -10,7 +10,9 @@
 //!
 //! Everything else, backends included, changes inside this process.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ek_ek_config::{ApplicationProtocol, Config, TransportProtocol};
@@ -22,7 +24,9 @@ use pingora::services::listening::Service;
 
 use crate::balance::Balancer;
 use crate::error::{Error, ErrorKind, Result};
+use crate::health::{Checked, Health, checked, watch};
 use crate::link::AgentLink;
+use crate::live::LiveConfig;
 use crate::proxy::Proxy;
 use crate::stream::StreamProxy;
 
@@ -176,6 +180,15 @@ pub fn build(link: AgentLink) -> Result<Server> {
     }
 
     status.set_state(DataPlaneState::Serving);
+    // Health checking runs beside the traffic path rather than inside it, so
+    // a slow probe never delays a request (T-021).
+    server.add_service(background_service(
+        "health checks",
+        HealthService {
+            live: Arc::clone(&live),
+            health: balancer.health(),
+        },
+    ));
     server.add_service(background_service("node-agent link", LinkService { link }));
 
     Ok(server)
@@ -198,5 +211,91 @@ impl pingora::services::background::BackgroundService for LinkService {
                 let _ = stop_sender.send(true);
             }
         }
+    }
+}
+
+/// Keeps one probe task per checked member, following the configuration.
+///
+/// A configuration change stops the tasks that no longer apply and starts the
+/// ones that now do. What it never does is reset the health of a member that
+/// did not change, because a pool edit elsewhere is not evidence about this
+/// member.
+struct HealthService {
+    live: Arc<LiveConfig>,
+    health: Arc<Health>,
+}
+
+/// How often the service looks for a configuration change.
+///
+/// Short enough that a new member starts being probed promptly, long enough
+/// that the comparison costs nothing.
+const RESCAN: Duration = Duration::from_millis(500);
+
+#[async_trait]
+impl pingora::services::background::BackgroundService for HealthService {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        let mut running: BTreeMap<(String, String), Running> = BTreeMap::new();
+
+        loop {
+            let live = self.live.load();
+            let wanted = checked(&live.config);
+
+            // Stop what is gone or has changed, keep what is untouched.
+            let keep: BTreeMap<(String, String), Checked> = wanted
+                .into_iter()
+                .map(|target| ((target.pool.clone(), target.member.clone()), target))
+                .collect();
+            running.retain(|key, task| {
+                let same = keep.get(key).is_some_and(|target| *target == task.target);
+                if !same {
+                    task.stop();
+                }
+                same
+            });
+
+            // Start what is new.
+            for (key, target) in keep {
+                if running.contains_key(&key) {
+                    continue;
+                }
+                let (stop, listen) = tokio::sync::watch::channel(false);
+                let handle = tokio::spawn(watch(Arc::clone(&self.health), target.clone(), listen));
+                running.insert(
+                    key,
+                    Running {
+                        target,
+                        stop,
+                        handle,
+                    },
+                );
+            }
+
+            // A member that has left the configuration keeps no state.
+            self.health.retain(&live.config);
+
+            tokio::select! {
+                () = tokio::time::sleep(RESCAN) => {}
+                _ = shutdown.changed() => {
+                    for (_, task) in running {
+                        task.stop();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One probe task and the handle that stops it.
+struct Running {
+    target: Checked,
+    stop: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Running {
+    fn stop(&self) {
+        let _ = self.stop.send(true);
+        self.handle.abort();
     }
 }

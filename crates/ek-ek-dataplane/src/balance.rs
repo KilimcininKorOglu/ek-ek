@@ -9,21 +9,22 @@
 //!
 //! # Who is eligible
 //!
-//! Only a member an operator has enabled takes a new request. A draining
-//! member keeps the connections it has and receives no more, and a disabled
-//! member receives nothing at all. Health is not consulted here: probing
-//! arrives with T-021, and until then every enabled member is treated as able
-//! to answer.
+//! Only a member an operator has enabled and health checking has not taken out
+//! takes a new request. A draining member keeps the connections it has and
+//! receives no more, and a disabled member receives nothing at all. When that
+//! leaves nobody, the pool sends nothing and the caller answers rather than
+//! forwarding to a member known to be down (ADR-0062).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ek_ek_config::{AdminState, Backend, BackendMember, LoadBalancingAlgorithm};
 use ek_ek_ipc::OpenConnections;
 
 use crate::hashring::{HashRing, hash};
+use crate::health::Health;
 
 /// Identifies where a connection came from and where it went, for counting
 /// open connections (ADR-0061).
@@ -45,17 +46,22 @@ pub struct Balancer {
     cursor: AtomicU64,
     /// Open connections per member.
     open: Mutex<BTreeMap<MemberKey, u64>>,
+    /// What health checking has decided (T-021).
+    health: Arc<Health>,
 }
 
-/// The members a pool can currently send to, with their weights expanded.
+/// The members a pool can currently send to.
 ///
-/// Expanding the weights is what makes a weight of 2 take twice the share:
-/// the member appears twice in the walk rather than being skipped every other
-/// turn by an extra rule.
-fn eligible(pool: &Backend) -> Vec<&BackendMember> {
+/// Two things take a member out: an operator disabling it, and health checking
+/// deciding it is not answering. They are the same to the caller, so they are
+/// filtered in one place. A pool where that leaves nobody sends nothing, and
+/// the caller answers rather than forwarding to a member known to be down
+/// (ADR-0062).
+fn eligible<'a>(pool: &'a Backend, health: &Health) -> Vec<&'a BackendMember> {
     pool.members
         .iter()
         .filter(|member| member.admin_state == AdminState::Enabled)
+        .filter(|member| health.is_healthy(pool.id.as_str(), member.id.as_str()))
         .collect()
 }
 
@@ -80,6 +86,21 @@ impl Balancer {
         Self::default()
     }
 
+    /// Starts with an existing health table, shared with the checker.
+    #[must_use]
+    pub fn with_health(health: Arc<Health>) -> Self {
+        Self {
+            health,
+            ..Self::default()
+        }
+    }
+
+    /// Returns the health table this balancer consults.
+    #[must_use]
+    pub fn health(&self) -> Arc<Health> {
+        Arc::clone(&self.health)
+    }
+
     /// Chooses the member that answers this request.
     ///
     /// Returns `None` when the pool has nobody able to take it, which the
@@ -91,7 +112,7 @@ impl Balancer {
         ring: &HashRing,
         client: IpAddr,
     ) -> Option<&'a BackendMember> {
-        let members = eligible(pool);
+        let members = eligible(pool, &self.health);
         if members.is_empty() {
             return None;
         }
@@ -219,7 +240,14 @@ fn total_for(open: &BTreeMap<MemberKey, u64>, pool: &str, member: &str) -> u64 {
 /// share and leaves everybody else where they were.
 #[must_use]
 pub fn ring_for(pool: &Backend) -> HashRing {
-    let members = eligible(pool);
+    // Built from the administrative state only. Health changes far more often
+    // than configuration, and rebuilding the ring on every probe would move
+    // clients that had no reason to move.
+    let members: Vec<&BackendMember> = pool
+        .members
+        .iter()
+        .filter(|member| member.admin_state == AdminState::Enabled)
+        .collect();
     let identities: Vec<&str> = members.iter().map(|member| member.id.as_str()).collect();
     HashRing::build(&identities)
 }

@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::frontend::TransportProtocol;
+
 /// The periodic check that decides whether a member takes traffic.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +55,12 @@ pub enum HealthProbe {
         send: ProbePayload,
         /// Data the answer must contain.
         expect: ProbePayload,
+        /// Which socket the probe opens.
+        ///
+        /// Named rather than inferred from the frontends publishing the pool:
+        /// a DNS pool is published from a TCP and a UDP frontend at once, so
+        /// there would be no single answer to infer (ADR-0064).
+        transport: TransportProtocol,
     },
     /// Sends a real DNS query and requires a valid answer.
     DnsQuery {
