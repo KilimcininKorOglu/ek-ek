@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::SessionStickiness;
 use crate::certificate::CertificateSource;
 use crate::config::Config;
-use crate::frontend::{ApplicationProtocol, TransportProtocol};
+use crate::frontend::{ApplicationProtocol, RuleAction, TransportProtocol};
 use crate::id::{BackendId, CertificateId, DnsProviderId, NodeId, VipId};
 
 /// A stable identifier for one kind of validation failure.
@@ -52,6 +52,9 @@ pub enum ErrorCode {
     /// A frontend carries TLS settings without terminating TLS.
     #[serde(rename = "config.frontend.tls_without_http")]
     FrontendTlsWithoutHttp,
+    /// A frontend redirects without speaking HTTP, where it cannot answer.
+    #[serde(rename = "config.frontend.redirect_without_http")]
+    FrontendRedirectWithoutHttp,
     /// A VIP still has frontends bound to it.
     #[serde(rename = "config.vip.in_use")]
     VipInUse,
@@ -86,13 +89,14 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
         Self::FrontendUnknownBackend,
         Self::FrontendUnknownCertificate,
         Self::FrontendTlsWithoutHttp,
+        Self::FrontendRedirectWithoutHttp,
         Self::VipInUse,
         Self::VipUnknownPreferredNode,
         Self::CertificateUnknownDnsProvider,
@@ -115,6 +119,7 @@ impl ErrorCode {
             Self::FrontendUnknownBackend => "config.frontend.unknown_backend",
             Self::FrontendUnknownCertificate => "config.frontend.unknown_certificate",
             Self::FrontendTlsWithoutHttp => "config.frontend.tls_without_http",
+            Self::FrontendRedirectWithoutHttp => "config.frontend.redirect_without_http",
             Self::VipInUse => "config.vip.in_use",
             Self::VipUnknownPreferredNode => "config.vip.unknown_preferred_node",
             Self::CertificateUnknownDnsProvider => "config.certificate.unknown_dns_provider",
@@ -309,6 +314,7 @@ pub fn validate(config: &Config) -> Result<(), ValidationErrors> {
     check_frontend_bindings(config, &mut errors);
     check_frontend_references(config, &mut errors);
     check_tls_placement(config, &mut errors);
+    check_redirects(config, &mut errors);
     check_vips(config, &mut errors);
     check_certificates(config, &mut errors);
     check_backends(config, &mut errors);
@@ -510,13 +516,17 @@ fn check_frontend_references(config: &Config, errors: &mut Vec<ValidationError>)
             unknown_backend(backend, here().field("default_backend"));
         }
         for (rule_at, rule) in frontend.routing_rules.iter().enumerate() {
-            unknown_backend(
-                &rule.backend,
-                here()
-                    .field("routing_rules")
-                    .index(rule_at)
-                    .field("backend"),
-            );
+            // A redirect rule names no pool, so there is nothing to resolve.
+            if let RuleAction::Proxy { backend } = &rule.action {
+                unknown_backend(
+                    backend,
+                    here()
+                        .field("routing_rules")
+                        .index(rule_at)
+                        .field("action")
+                        .field("backend"),
+                );
+            }
         }
         for (rule_at, rule) in frontend.sni_rules.iter().enumerate() {
             unknown_backend(
@@ -555,6 +565,41 @@ fn check_tls_placement(config: &Config, errors: &mut Vec<ValidationError>) {
                 )
                 .with_id("frontend", frontend.id.as_str()),
             );
+        }
+    }
+}
+
+/// Checks that a redirecting frontend can answer, and does only that.
+///
+/// A frontend either proxies or redirects. Letting it carry both would leave
+/// one of the two doing nothing, and which one wins is exactly the kind of
+/// thing nobody discovers until traffic is on it (ADR-0057).
+fn check_redirects(config: &Config, errors: &mut Vec<ValidationError>) {
+    for (at, frontend) in config.frontends.iter().enumerate() {
+        // Answering with a status line and a `Location` header means speaking
+        // HTTP. A raw or a passthrough frontend has no way to say it, so a
+        // redirect rule there would never fire and nobody would know why.
+        if frontend.application == ApplicationProtocol::Http
+            && frontend.transport == TransportProtocol::Tcp
+        {
+            continue;
+        }
+
+        for (rule_at, rule) in frontend.routing_rules.iter().enumerate() {
+            if matches!(rule.action, RuleAction::Redirect { .. }) {
+                errors.push(
+                    ValidationError::new(
+                        ErrorCode::FrontendRedirectWithoutHttp,
+                        FieldPath::root()
+                            .field("frontends")
+                            .index(at)
+                            .field("routing_rules")
+                            .index(rule_at)
+                            .field("action"),
+                    )
+                    .with_id("frontend", frontend.id.as_str()),
+                );
+            }
         }
     }
 }
@@ -675,10 +720,9 @@ fn check_stickiness_against_transport(config: &Config, errors: &mut Vec<Validati
 
 fn reaches(frontend: &crate::frontend::Frontend, backend: &BackendId) -> bool {
     frontend.default_backend.as_ref() == Some(backend)
-        || frontend
-            .routing_rules
-            .iter()
-            .any(|rule| &rule.backend == backend)
+        || frontend.routing_rules.iter().any(
+            |rule| matches!(&rule.action, RuleAction::Proxy { backend: named } if named == backend),
+        )
         || frontend
             .sni_rules
             .iter()

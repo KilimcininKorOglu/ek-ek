@@ -15,8 +15,9 @@ use ek_ek_config::{
     CertificateSource, CertificateValidity, Config, ConnectionPooling, DnsProvider,
     DnsProviderConnection, DnsProviderId, DnsRecordType, Frontend, FrontendId, HealthCheck,
     HealthProbe, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, ProbePayload,
-    ProxyProtocol, RoutingRule, SameSitePolicy, SchemaVersion, SecretId, SessionStickiness,
-    SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol, TsigAlgorithm, Vip, VipId,
+    ProxyProtocol, RoutingRule, RuleAction, SameSitePolicy, SchemaVersion, SecretId,
+    SessionStickiness, SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol, TsigAlgorithm, Vip,
+    VipId,
 };
 
 pub fn address(last: u8) -> IpAddr {
@@ -104,19 +105,25 @@ pub fn http_frontend() -> Frontend {
             RoutingRule {
                 host_pattern: Some("mail.example.org".to_owned()),
                 path_prefix: Some("/Microsoft-Server-ActiveSync".to_owned()),
-                backend: BackendId::new("web"),
+                action: RuleAction::Proxy {
+                    backend: BackendId::new("web"),
+                },
                 request_timeout_seconds: Some(3900),
             },
             RoutingRule {
                 host_pattern: Some("mail.example.org".to_owned()),
                 path_prefix: Some("/owa".to_owned()),
-                backend: BackendId::new("web"),
+                action: RuleAction::Proxy {
+                    backend: BackendId::new("web"),
+                },
                 request_timeout_seconds: None,
             },
             RoutingRule {
                 host_pattern: None,
                 path_prefix: Some("/api".to_owned()),
-                backend: BackendId::new("web"),
+                action: RuleAction::Proxy {
+                    backend: BackendId::new("web"),
+                },
                 request_timeout_seconds: Some(60),
             },
         ],

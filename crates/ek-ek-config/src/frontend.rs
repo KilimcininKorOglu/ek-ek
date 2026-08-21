@@ -140,13 +140,66 @@ pub struct RoutingRule {
     /// Path the request must start with, matched after normalisation so that
     /// `/owa/../admin` cannot slip past an `/owa` rule.
     pub path_prefix: Option<String>,
-    /// Pool requests matching this rule are sent to.
-    pub backend: BackendId,
+    /// What happens to a request this rule matches.
+    pub action: RuleAction,
     /// Time a matching request may take, in seconds.
     ///
     /// Unset falls back to the frontend's own limit. ActiveSync push and
     /// IMAP IDLE need values of an hour or more here.
     pub request_timeout_seconds: Option<u32>,
+}
+
+/// What a matched request is done with (ADR-0057).
+///
+/// A rule either forwards the request or answers it with a redirect. It never
+/// does anything else: there is no header rewriting, no body change and no
+/// scripting. Widening this beyond the two variants needs a new decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuleAction {
+    /// Forwards the request to a pool.
+    Proxy {
+        /// Pool the request is sent to.
+        backend: BackendId,
+    },
+    /// Answers with a redirect to HTTPS on the same host.
+    ///
+    /// A site with a certificate has to answer on port 80 as well, or the
+    /// address someone typed into a browser reaches nothing. The answer is
+    /// produced here rather than by a backend, so no plaintext request ever
+    /// leaves the load balancer.
+    Redirect {
+        /// Which permanent redirect to send.
+        status: RedirectStatus,
+    },
+}
+
+/// Which redirect status a rule answers with.
+///
+/// The path and the query string are carried over either way. There is no
+/// setting to drop them, because a redirect that loses the path takes the
+/// visitor away from the page they asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedirectStatus {
+    /// Answers with `301`. A browser following it rewrites a POST into a GET,
+    /// which loses the request body.
+    MovedPermanently,
+    /// Answers with `308`, keeping the method and the body, so an API
+    /// published this way keeps working. That is why it is the default.
+    #[default]
+    Permanent,
+}
+
+impl RedirectStatus {
+    /// Returns the HTTP status code to answer with.
+    #[must_use]
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::MovedPermanently => 301,
+            Self::Permanent => 308,
+        }
+    }
 }
 
 /// One SNI rule for a passthrough frontend.

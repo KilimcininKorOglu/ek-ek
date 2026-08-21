@@ -13,8 +13,9 @@ mod common;
 
 use common::sample;
 use ek_ek_config::{
-    ApplicationProtocol, BackendId, CertificateId, ErrorCode, ParameterValue, SameSitePolicy,
-    SessionStickiness, TransportProtocol, ValidationErrors, VipId, validate, validate_vip_removal,
+    ApplicationProtocol, BackendId, CertificateId, ErrorCode, ParameterValue, RuleAction,
+    SameSitePolicy, SessionStickiness, TransportProtocol, ValidationErrors, VipId, validate,
+    validate_vip_removal,
 };
 
 /// Runs validation and requires it to fail, returning what it found.
@@ -106,11 +107,13 @@ fn a_frontend_pointing_at_an_unknown_backend_is_refused() {
 
     // A rule inside the frontend is checked too, and blamed on its own path.
     let mut config = sample();
-    config.frontends[0].routing_rules[1].backend = BackendId::new("backend-missing");
+    config.frontends[0].routing_rules[1].action = RuleAction::Proxy {
+        backend: BackendId::new("backend-missing"),
+    };
     let found = faults(&config);
     assert_eq!(
         found.as_slice()[0].path.as_text(),
-        "frontends[0].routing_rules[1].backend"
+        "frontends[0].routing_rules[1].action.backend"
     );
 }
 
@@ -419,7 +422,9 @@ fn the_udp_rule_looks_past_the_default_backend() {
         .push(ek_ek_config::RoutingRule {
             host_pattern: None,
             path_prefix: None,
-            backend: BackendId::new("dns"),
+            action: RuleAction::Proxy {
+                backend: BackendId::new("dns"),
+            },
             request_timeout_seconds: None,
         });
     config.backends[1].stickiness = SessionStickiness::SignedCookie {

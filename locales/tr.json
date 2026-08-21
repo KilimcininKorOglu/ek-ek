@@ -4,6 +4,7 @@
   "config.certificate.unknown_dns_provider": "'{certificate}' sertifikası tanımlı olmayan '{provider}' DNS sağlayıcısını gösteriyor.",
   "config.duplicate_id": "Aynı {kind} kimliği birden fazla kez tanımlanmış: '{id}'.",
   "config.frontend.duplicate_binding": "'{vip}' adresinin {port} portu zaten '{conflicting_frontend}' frontend'i tarafından kullanılıyor.",
+  "config.frontend.redirect_without_http": "'{frontend}' frontend'i yönlendirme kuralı taşıyor ama HTTP konuşmuyor, bu yüzden yanıt veremez.",
   "config.frontend.tls_without_http": "'{frontend}' frontend'i TLS ayarı taşıyor ama HTTP konuşmuyor.",
   "config.frontend.unknown_backend": "'{frontend}' frontend'i tanımlı olmayan '{backend}' backend'ini gösteriyor.",
   "config.frontend.unknown_certificate": "'{frontend}' frontend'i tanımlı olmayan '{certificate}' sertifikasını gösteriyor.",

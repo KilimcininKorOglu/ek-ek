@@ -45,7 +45,8 @@ use crate::backend::{
 use crate::certificate::{Certificate, CertificateSource};
 use crate::config::Config;
 use crate::frontend::{
-    ApplicationProtocol, Frontend, ProxyProtocol, RoutingRule, TlsSettings, TransportProtocol,
+    ApplicationProtocol, Frontend, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction,
+    TlsSettings, TransportProtocol,
 };
 use crate::health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
 use crate::id::{BackendId, CertificateId, FrontendId, MemberId, NodeId, TemplateId, VipId};
@@ -480,7 +481,15 @@ pub fn from_frontend(
     let wanted: BTreeSet<&BackendId> = stripped
         .default_backend
         .iter()
-        .chain(stripped.routing_rules.iter().map(|rule| &rule.backend))
+        .chain(
+            stripped
+                .routing_rules
+                .iter()
+                .filter_map(|rule| match &rule.action {
+                    RuleAction::Proxy { backend } => Some(backend),
+                    RuleAction::Redirect { .. } => None,
+                }),
+        )
         .chain(stripped.sni_rules.iter().map(|rule| &rule.backend))
         .collect();
 
@@ -719,6 +728,41 @@ fn build_website(
             drain_timeout_seconds: 30,
         },
     );
+
+    // Port 80 answers as well. Without it the address someone typed into a
+    // browser reaches nothing, and the operator is left publishing a site
+    // that only works if the visitor types the scheme (ADR-0057).
+    //
+    // The redirect is answered here, so no plaintext request is ever
+    // forwarded to a backend.
+    add_frontend(
+        config,
+        created,
+        Frontend {
+            id: FrontendId::new(format!("{}-http", values.name)),
+            vip: vip.clone(),
+            port: 80,
+            transport: TransportProtocol::Tcp,
+            application: ApplicationProtocol::Http,
+            tls: None,
+            proxy_protocol: ProxyProtocol::Disabled,
+            routing_rules: vec![RoutingRule {
+                // Matches everything, which is what a redirect listener is.
+                host_pattern: None,
+                path_prefix: None,
+                action: RuleAction::Redirect {
+                    // 308 rather than 301: a browser following a 301 turns a
+                    // POST into a GET and drops the body.
+                    status: RedirectStatus::Permanent,
+                },
+                request_timeout_seconds: None,
+            }],
+            sni_rules: Vec::new(),
+            // Nothing to fall through to: every request is answered.
+            default_backend: None,
+            drain_timeout_seconds: 10,
+        },
+    );
 }
 
 fn build_dns(config: &mut Config, created: &mut Vec<Created>, values: &Common<'_>, vip: &VipId) {
@@ -833,7 +877,9 @@ fn build_exchange(
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/Microsoft-Server-ActiveSync".to_owned()),
-            backend: activesync,
+            action: RuleAction::Proxy {
+                backend: activesync,
+            },
             // Push email holds the request open. Anything shorter turns push
             // into polling and drains phone batteries (ADR-0044).
             request_timeout_seconds: Some(3_600),
@@ -841,19 +887,21 @@ fn build_exchange(
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/mapi".to_owned()),
-            backend: mapi,
+            action: RuleAction::Proxy { backend: mapi },
             request_timeout_seconds: Some(3_600),
         },
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/ews".to_owned()),
-            backend: ews,
+            action: RuleAction::Proxy { backend: ews },
             request_timeout_seconds: Some(600),
         },
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/owa".to_owned()),
-            backend: owa.clone(),
+            action: RuleAction::Proxy {
+                backend: owa.clone(),
+            },
             request_timeout_seconds: Some(600),
         },
     ];

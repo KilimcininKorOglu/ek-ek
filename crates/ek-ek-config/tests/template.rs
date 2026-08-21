@@ -24,7 +24,8 @@ use ek_ek_config::template::{
 use ek_ek_config::{
     AdminState, ApplicationProtocol, Backend, BackendId, BackendMember, Config, ConnectionPooling,
     ErrorCode, Frontend, FrontendId, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole,
-    ProxyProtocol, SchemaVersion, TemplateId, TransportProtocol, validate,
+    ProxyProtocol, RedirectStatus, RuleAction, SchemaVersion, TemplateId, TransportProtocol,
+    validate,
 };
 
 /// A config with two nodes and nothing published yet.
@@ -101,6 +102,16 @@ fn frontend<'a>(applied: &'a Applied, id: &str) -> &'a Frontend {
         })
 }
 
+/// Returns the pool a rule forwards to, refusing a rule that redirects.
+fn proxied(rule: &ek_ek_config::RoutingRule) -> &BackendId {
+    match &rule.action {
+        RuleAction::Proxy { backend } => backend,
+        RuleAction::Redirect { .. } => {
+            panic!("this rule redirects; it names no pool")
+        }
+    }
+}
+
 fn backend<'a>(applied: &'a Applied, id: &BackendId) -> &'a Backend {
     applied
         .config
@@ -155,6 +166,98 @@ fn the_website_template_publishes_https_with_a_pool_and_a_health_check() {
         matches!(&check.probe, ek_ek_config::HealthProbe::Http { .. }),
         "a web pool is checked over HTTP, not by opening a socket: {:?}",
         check.probe
+    );
+}
+
+#[test]
+fn the_website_template_answers_on_port_eighty_with_a_redirect() {
+    let applied = run(
+        "website",
+        arguments("shop").with("domain", Argument::Text("shop.example.org".to_owned())),
+    );
+
+    let plain = frontend(&applied, "shop-http");
+    assert_eq!(plain.port, 80);
+    assert_eq!(
+        plain.application,
+        ApplicationProtocol::Http,
+        "answering with a status line and a Location header means speaking HTTP"
+    );
+    assert!(plain.tls.is_none());
+
+    assert_eq!(plain.routing_rules.len(), 1);
+    let rule = &plain.routing_rules[0];
+    assert_eq!(
+        rule.action,
+        RuleAction::Redirect {
+            status: RedirectStatus::Permanent
+        },
+        "308 rather than 301: a browser following a 301 turns a POST into a \
+         GET and drops the body"
+    );
+    assert_eq!(RedirectStatus::Permanent.code(), 308);
+    assert_eq!(RedirectStatus::MovedPermanently.code(), 301);
+
+    assert!(
+        rule.host_pattern.is_none() && rule.path_prefix.is_none(),
+        "a redirect listener answers everything, so the rule matches everything"
+    );
+
+    // Nothing to forward to. A pool here would mean a plaintext request could
+    // reach a backend, which is the opposite of what this listener is for.
+    assert!(plain.default_backend.is_none());
+    assert!(
+        !applied.config.backends.iter().any(|pool| {
+            plain.routing_rules.iter().any(
+                |rule| matches!(&rule.action, RuleAction::Proxy { backend } if backend == &pool.id),
+            )
+        }),
+        "the redirect listener must reach no pool at all"
+    );
+
+    // Measured against the listener beside it, which does forward.
+    let secure = frontend(&applied, "shop-https");
+    assert!(secure.default_backend.is_some());
+    assert!(secure.routing_rules.is_empty());
+}
+
+#[test]
+fn a_redirect_rule_needs_a_frontend_that_can_answer() {
+    let applied = run(
+        "website",
+        arguments("shop").with("domain", Argument::Text("shop.example.org".to_owned())),
+    );
+    assert!(validate(&applied.config).is_ok());
+
+    // The same rule on a frontend that forwards bytes without reading them
+    // has no way to send a status line, so it would never fire.
+    let mut raw = applied.config.clone();
+    let plain = raw
+        .frontends
+        .iter_mut()
+        .find(|frontend| frontend.id.as_str() == "shop-http")
+        .expect("the listener is there");
+    plain.application = ApplicationProtocol::Raw;
+
+    let refused = validate(&raw).expect_err("a raw frontend cannot answer a redirect");
+    assert!(
+        refused.contains(ErrorCode::FrontendRedirectWithoutHttp),
+        "{:?}",
+        refused.codes()
+    );
+
+    // And on UDP, where there is no request to answer either.
+    let mut udp = applied.config;
+    let plain = udp
+        .frontends
+        .iter_mut()
+        .find(|frontend| frontend.id.as_str() == "shop-http")
+        .expect("the listener is there");
+    plain.transport = TransportProtocol::Udp;
+    assert!(
+        validate(&udp)
+            .expect_err("a UDP frontend cannot answer a redirect")
+            .contains(ErrorCode::FrontendRedirectWithoutHttp)
     );
 }
 
@@ -237,11 +340,7 @@ fn the_exchange_template_produces_four_paths_and_four_pools() {
         );
     }
 
-    let pools: Vec<&BackendId> = listener
-        .routing_rules
-        .iter()
-        .map(|rule| &rule.backend)
-        .collect();
+    let pools: Vec<&BackendId> = listener.routing_rules.iter().map(proxied).collect();
     let distinct: std::collections::BTreeSet<&&BackendId> = pools.iter().collect();
     assert_eq!(
         distinct.len(),
@@ -298,7 +397,7 @@ fn the_mapi_pool_opens_a_connection_per_request() {
         .find(|rule| rule.path_prefix.as_deref() == Some("/mapi"))
         .expect("MAPI must be routed");
     assert_eq!(
-        backend(&applied, &mapi.backend).connection_pooling,
+        backend(&applied, proxied(mapi)).connection_pooling,
         ConnectionPooling::Disabled,
         "NTLM binds authentication to the connection; reusing one serves \
          another user's request under the wrong identity (ADR-0045)"
@@ -312,7 +411,7 @@ fn the_mapi_pool_opens_a_connection_per_request() {
         .find(|rule| rule.path_prefix.as_deref() == Some("/owa"))
         .expect("OWA must be routed");
     assert_eq!(
-        backend(&applied, &owa.backend).connection_pooling,
+        backend(&applied, proxied(owa)).connection_pooling,
         ConnectionPooling::Enabled
     );
 }
