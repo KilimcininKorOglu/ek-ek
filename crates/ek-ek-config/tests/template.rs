@@ -49,6 +49,7 @@ fn empty_cluster() -> Config {
         backends: Vec::new(),
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        stickiness_key: String::new(),
     }
 }
 

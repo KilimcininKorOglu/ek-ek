@@ -32,6 +32,17 @@ pub struct Config {
     pub certificates: Vec<Certificate>,
     /// Providers used for the ACME DNS-01 challenge.
     pub dns_providers: Vec<DnsProvider>,
+    /// Key the stickiness cookie is signed with, as hex.
+    ///
+    /// It sits at the root rather than inside a pool because it has to be
+    /// the same on every node: the VIP moves, and a cookie written on one
+    /// node is read on another (ADR-0065). Generating it and replicating it
+    /// belong to M6; this release reads it.
+    ///
+    /// Empty means no key is configured, which validation refuses only when
+    /// a pool actually asks for cookie stickiness.
+    #[serde(default)]
+    pub stickiness_key: String,
 }
 
 /// The schema a configuration record was written against.

@@ -437,3 +437,119 @@ fn the_udp_rule_looks_past_the_default_backend() {
     assert!(found.contains(ErrorCode::BackendCookieStickinessOnUdp));
     assert_eq!(config.frontends[3].transport, TransportProtocol::Udp);
 }
+
+#[test]
+fn cookie_stickiness_without_a_signing_key_is_refused() {
+    let mut config = sample();
+    assert!(
+        matches!(
+            config.backends[0].stickiness,
+            SessionStickiness::SignedCookie { .. }
+        ),
+        "the fixture must already use cookie stickiness"
+    );
+    config.stickiness_key = String::new();
+
+    let found = faults(&config);
+
+    assert!(found.contains(ErrorCode::StickinessKeyMissing));
+    assert_eq!(
+        found
+            .as_slice()
+            .iter()
+            .find(|error| error.code == ErrorCode::StickinessKeyMissing)
+            .map(|error| error.path.as_text()),
+        Some("stickiness_key".to_owned())
+    );
+
+    // The other side: the same document with the key is accepted.
+    assert!(validate(&sample()).is_ok());
+}
+
+#[test]
+fn a_signing_key_shorter_than_thirty_two_bytes_is_refused() {
+    let mut config = sample();
+    // Thirty-one bytes: one short, so the boundary itself is measured
+    // rather than the difference between empty and long.
+    config.stickiness_key = "aa".repeat(31);
+
+    assert!(faults(&config).contains(ErrorCode::StickinessKeyMissing));
+
+    config.stickiness_key = "aa".repeat(32);
+    assert!(
+        validate(&config).is_ok(),
+        "thirty-two bytes is the shortest key that must be accepted"
+    );
+}
+
+#[test]
+fn a_signing_key_that_is_not_hex_is_refused() {
+    let mut config = sample();
+    // Long enough, and every character is one an operator might type.
+    config.stickiness_key = "z".repeat(64);
+
+    assert!(faults(&config).contains(ErrorCode::StickinessKeyMissing));
+
+    // An odd number of digits names no whole byte either.
+    config.stickiness_key = "a".repeat(65);
+    assert!(faults(&config).contains(ErrorCode::StickinessKeyMissing));
+}
+
+#[test]
+fn a_document_with_no_stickiness_needs_no_signing_key() {
+    // Demanding a key from a configuration that never signs anything would
+    // refuse a document that works.
+    let mut config = sample();
+    for backend in &mut config.backends {
+        backend.stickiness = SessionStickiness::Disabled;
+    }
+    config.stickiness_key = String::new();
+
+    assert!(
+        validate(&config).is_ok(),
+        "a document with stickiness off was refused for having no key"
+    );
+}
+
+#[test]
+fn a_stickiness_cookie_name_that_breaks_the_header_is_refused() {
+    // A newline splits the response outright; a semicolon or a space turns
+    // the rest of the cookie into attributes the client reads as its own.
+    for name in ["ek ek", "ek;ek", "ek\r\nSet-Cookie: admin=1", "ek=ek", ""] {
+        let mut config = sample();
+        config.backends[0].stickiness = SessionStickiness::SignedCookie {
+            cookie_name: name.to_owned(),
+            same_site: SameSitePolicy::Lax,
+        };
+
+        let found = faults(&config);
+
+        assert!(
+            found.contains(ErrorCode::BackendStickinessCookieNameInvalid),
+            "the name {name:?} was accepted"
+        );
+        assert_eq!(
+            found
+                .as_slice()
+                .iter()
+                .find(|error| error.code == ErrorCode::BackendStickinessCookieNameInvalid)
+                .map(|error| error.path.as_text()),
+            Some("backends[0].stickiness.cookie_name".to_owned())
+        );
+    }
+
+    // The other side: the names an operator would actually pick.
+    for name in ["EKEK", "ek-ek-affinity", "my_session", "JSESSIONID"] {
+        let mut config = sample();
+        config.backends[0].stickiness = SessionStickiness::SignedCookie {
+            cookie_name: name.to_owned(),
+            same_site: SameSitePolicy::Lax,
+        };
+
+        assert!(
+            validate(&config).is_ok(),
+            "the name {name:?} was refused: {:?}",
+            validate(&config).err().map(|errors| errors.codes())
+        );
+    }
+}

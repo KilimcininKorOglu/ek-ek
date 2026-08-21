@@ -30,6 +30,7 @@ use pingora::upstreams::peer::Peer;
 use pingora::{Error, ErrorType};
 
 use crate::live::{Live, LiveConfig, Status};
+use crate::sticky::{self, Signer};
 
 /// Header carrying the client address to the backend.
 const FORWARDED_FOR: &str = "X-Forwarded-For";
@@ -58,6 +59,11 @@ pub struct RequestContext {
     /// Pool and member chosen, kept so the open connection count can be
     /// decremented when the request finishes.
     chosen: Option<(String, String)>,
+    /// The `Set-Cookie` line to add, when this request needs one.
+    ///
+    /// Built in the request filter, from the same snapshot everything else
+    /// was decided from, and written when the answer comes back.
+    set_cookie: Option<String>,
 }
 
 /// Proxies one frontend.
@@ -161,6 +167,19 @@ fn client_address(session: &Session) -> IpAddr {
         .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |inet| inet.ip())
 }
 
+/// Every `Cookie` header line a request carries.
+///
+/// A client may send the cookies in one line or in several, so all of them
+/// are read rather than only the first.
+fn cookie_lines(session: &Session) -> impl Iterator<Item = &str> {
+    session
+        .req_header()
+        .headers
+        .get_all(http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+}
+
 /// Builds the redirect answer.
 fn redirect_to_https(session: &Session, code: u16) -> Option<ResponseHeader> {
     let host = session
@@ -212,6 +231,7 @@ impl ProxyHttp for Proxy {
         RequestContext {
             peer: None,
             chosen: None,
+            set_cookie: None,
         }
     }
 
@@ -265,16 +285,49 @@ impl ProxyHttp for Proxy {
             }
             return Ok(true);
         };
-        let Some(member) = self
-            .balancer
-            .choose(pool, &live.ring(name), client_address(session))
-        else {
-            // Nobody in the pool can take it. Saying so beats closing the
-            // connection, which would look like a network fault.
-            if let Some(header) = bare(NO_MEMBER) {
-                answer(session, header).await;
+        // Stickiness first: a client the pool has already answered goes back
+        // to the same member, and only a client with no usable cookie is
+        // distributed by the algorithm (ADR-0024).
+        let sticky = sticky::settings(pool).and_then(|(cookie, policy)| {
+            Signer::from_hex(&live.config.stickiness_key).map(|signer| (cookie, policy, signer))
+        });
+
+        let pinned = sticky.as_ref().and_then(|(cookie, _, signer)| {
+            let value = sticky::read(cookie_lines(session), cookie)?;
+            // Only members that can take traffic are offered, so a cookie
+            // naming one that went out, or one that was removed from the
+            // pool, matches nothing and falls through to the algorithm.
+            signer.member_for(name, &self.balancer.eligible(pool), &value)
+        });
+
+        let member = match pinned {
+            Some(member) => member,
+            None => {
+                let Some(member) =
+                    self.balancer
+                        .choose(pool, &live.ring(name), client_address(session))
+                else {
+                    // Nobody in the pool can take it. Saying so beats closing
+                    // the connection, which would look like a network fault.
+                    if let Some(header) = bare(NO_MEMBER) {
+                        answer(session, header).await;
+                    }
+                    return Ok(true);
+                };
+                // A cookie is written only when the client did not arrive
+                // with a usable one. Rewriting an already correct cookie on
+                // every answer would put a header on every response for no
+                // change.
+                if let Some((cookie, policy, signer)) = sticky.as_ref() {
+                    ctx.set_cookie = Some(sticky::set_cookie(
+                        cookie,
+                        &signer.token(name, member.id.as_str()),
+                        *policy,
+                        frontend.tls.is_some(),
+                    ));
+                }
+                member
             }
-            return Ok(true);
         };
 
         self.balancer
@@ -344,6 +397,22 @@ impl ProxyHttp for Proxy {
             upstream_request.insert_header(FORWARDED_HOST, host).ok();
         }
 
+        Ok(())
+    }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        // Appended rather than inserted: the application may set cookies of
+        // its own, and replacing the header would drop them.
+        if let Some(cookie) = ctx.set_cookie.take() {
+            upstream_response
+                .append_header(http::header::SET_COOKIE, cookie)
+                .ok();
+        }
         Ok(())
     }
 

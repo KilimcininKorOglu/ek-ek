@@ -27,6 +27,7 @@ pub mod live;
 pub mod probe;
 pub mod proxy;
 pub mod server;
+pub mod sticky;
 pub mod stream;
 
 pub use balance::{Balancer, ring_for};

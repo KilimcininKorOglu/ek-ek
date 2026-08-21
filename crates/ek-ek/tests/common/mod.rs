@@ -102,8 +102,17 @@ impl Member {
         Self::with_behaviour(name, Behaviour::Prompt).await
     }
 
+    /// Starts a member that sets a cookie of its own on every answer.
+    pub async fn setting_cookie(name: &str, cookie: &str) -> Self {
+        Self::build(name, Behaviour::Prompt, Some(cookie.to_owned())).await
+    }
+
     /// Starts a member behaving as asked.
     pub async fn with_behaviour(name: &str, behaviour: Behaviour) -> Self {
+        Self::build(name, behaviour, None).await
+    }
+
+    async fn build(name: &str, behaviour: Behaviour, own_cookie: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a backend port must be free");
@@ -129,6 +138,7 @@ impl Member {
                 let counted = Arc::clone(&counted);
                 let probed = Arc::clone(&probed);
                 let answering = Arc::clone(&answering);
+                let own_cookie = own_cookie.clone();
 
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
@@ -139,6 +149,7 @@ impl Member {
                         // measures, so they are collected rather than skipped.
                         let mut forwarded_for = String::new();
                         let mut forwarded_proto = String::new();
+                        let mut cookie = String::new();
                         let mut saw_request = false;
                         let mut is_probe = false;
 
@@ -163,6 +174,12 @@ impl Member {
                             }
                             if let Some(value) = lowered.strip_prefix("x-forwarded-proto:") {
                                 forwarded_proto = value.trim().to_owned();
+                            }
+                            if let Some(value) = lowered.strip_prefix("cookie:") {
+                                if !cookie.is_empty() {
+                                    cookie.push_str("; ");
+                                }
+                                cookie.push_str(value.trim());
                             }
                             // Health traffic names itself, which is the only
                             // reason a backend can tell it from a real
@@ -201,10 +218,17 @@ impl Member {
                             counted.fetch_add(1, Ordering::SeqCst);
                         }
                         let body = format!(
-                            "member={identity}\nforwarded_for={forwarded_for}\nforwarded_proto={forwarded_proto}\n"
+                            "member={identity}\nforwarded_for={forwarded_for}\nforwarded_proto={forwarded_proto}\ncookie={cookie}\n"
                         );
+                        // An application that sets its own cookies is what
+                        // proves the proxy adds to them rather than replacing
+                        // the header they arrive in.
+                        let own = own_cookie
+                            .as_ref()
+                            .map(|line| format!("Set-Cookie: {line}\r\n"))
+                            .unwrap_or_default();
                         let answer = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n{own}Content-Length: {}\r\n\r\n{body}",
                             body.len()
                         );
                         if writer.write_all(answer.as_bytes()).await.is_err() {
@@ -272,6 +296,12 @@ impl Drop for Member {
     }
 }
 
+/// The key the stickiness cookie is signed with in tests.
+///
+/// Not a secret: it exists so a document that turns stickiness on is valid,
+/// and so a test can sign a value the way the product would.
+pub const STICKINESS_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 /// A configuration document, written as text.
 pub struct Document {
     /// Port the frontend listens on.
@@ -296,6 +326,14 @@ pub struct Document {
     pub routing_rules: Vec<String>,
     /// Pool used when no rule matches, or nothing.
     pub default_backend: String,
+    /// The pool's stickiness, already rendered.
+    pub stickiness: String,
+    /// The frontend's TLS settings, already rendered, or `null`.
+    pub tls: String,
+    /// Certificates, already rendered.
+    pub certificates: String,
+    /// Key the stickiness cookie is signed with, as hex.
+    pub stickiness_key: String,
 }
 
 impl Document {
@@ -314,7 +352,42 @@ impl Document {
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
             default_backend: r#""web""#.to_owned(),
+            stickiness: r#"{"mode":"disabled"}"#.to_owned(),
+            tls: "null".to_owned(),
+            certificates: String::new(),
+            stickiness_key: String::new(),
         }
+    }
+
+    /// Turns cookie stickiness on for the pool.
+    #[must_use]
+    pub fn sticky(mut self, cookie_name: &str, same_site: &str) -> Self {
+        self.stickiness = format!(
+            r#"{{"mode":"signed_cookie","cookie_name":"{cookie_name}","same_site":"{same_site}"}}"#
+        );
+        if self.stickiness_key.is_empty() {
+            self.stickiness_key = STICKINESS_KEY.to_owned();
+        }
+        self
+    }
+
+    /// Says the frontend terminates TLS.
+    ///
+    /// The listener is still plaintext until M4 brings termination, so a
+    /// test can still connect to it. What this changes now is what the
+    /// configuration says the client's scheme is.
+    #[must_use]
+    pub fn terminating_tls(mut self) -> Self {
+        self.tls = r#"{"certificates":["cert-web"],"policy":"dengeli"}"#.to_owned();
+        self.certificates = r#"{"id":"cert-web","sni_names":["ek-ek.test"],"source":{"type":"manual_upload"},"validity":null,"private_key":null}"#.to_owned();
+        self
+    }
+
+    /// Signs the stickiness cookie with a different key.
+    #[must_use]
+    pub fn stickiness_key(mut self, key: &str) -> Self {
+        self.stickiness_key = key.to_owned();
+        self
     }
 
     /// Chooses the algorithm.
@@ -391,10 +464,11 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"{application}","tls":null,"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5}}],
-"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}],
-"certificates":[],
-"dns_providers":[]}}"#,
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5}}],
+"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}],
+"certificates":[{certificates}],
+"dns_providers":[],
+"stickiness_key":"{stickiness_key}"}}"#,
             port = self.port,
             application = self.application,
             idle = self.idle_timeout_seconds,
@@ -406,6 +480,10 @@ impl Document {
             members = self.members.join(","),
             algorithm = self.algorithm,
             health_check = self.health_check,
+            stickiness = self.stickiness,
+            tls = self.tls,
+            certificates = self.certificates,
+            stickiness_key = self.stickiness_key,
         )
         .replace('\n', "")
     }
@@ -636,13 +714,8 @@ impl Drop for Agent {
 /// The running binary, stopped when the test ends however it ends.
 pub struct DataPlane {
     child: Child,
-    /// Where the binary's own diagnostics go.
-    ///
-    /// A file, never the pipe the test harness captures. That pipe has a
-    /// fixed buffer, and once several binaries have filled it they block on
-    /// their next write, before they have connected to the agent at all. The
-    /// tests then report that nothing started listening, which is true and
-    /// says nothing about why.
+    /// Where the binary's own diagnostics go, so a test that fails can say
+    /// what the binary said rather than only that nothing happened.
     complaints: PathBuf,
 }
 
@@ -672,7 +745,8 @@ impl DataPlane {
     ///
     /// A binary that refused its configuration or failed to bind is gone
     /// within a moment. Without this a test waits out the whole startup
-    /// window and then reports that nothing started listening.
+    /// window and then reports that nothing started listening, which says
+    /// nothing about why.
     pub fn exited(&mut self) -> Option<String> {
         match self.child.try_wait() {
             Ok(Some(status)) => Some(format!("{status}")),
@@ -737,9 +811,8 @@ impl Running {
             }
             if let Some(status) = self.data_plane.exited() {
                 panic!(
-                    "the traffic path exited with {status} instead of listening on port {}; it said: {}",
-                    self.port,
-                    self.data_plane.complaints()
+                    "the traffic path exited with {status} instead of listening on port {}",
+                    self.port
                 );
             }
             assert!(
@@ -808,6 +881,32 @@ impl Answer {
         self.field("member")
     }
 
+    /// Every `Set-Cookie` line the answer carries.
+    #[must_use]
+    pub fn set_cookies(&self) -> Vec<String> {
+        let lines = self.header("set-cookie");
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        lines.lines().map(str::to_owned).collect()
+    }
+
+    /// The `Set-Cookie` line that sets this cookie, if there is one.
+    #[must_use]
+    pub fn set_cookie(&self, name: &str) -> Option<String> {
+        self.set_cookies()
+            .into_iter()
+            .find(|line| line.starts_with(&format!("{name}=")))
+    }
+
+    /// The value a named cookie is set to, without its attributes.
+    #[must_use]
+    pub fn cookie_value(&self, name: &str) -> Option<String> {
+        let line = self.set_cookie(name)?;
+        let pair = line.split(';').next()?;
+        pair.split_once('=').map(|(_, value)| value.to_owned())
+    }
+
     /// One `name=value` line of the body.
     #[must_use]
     pub fn field(&self, name: &str) -> String {
@@ -874,7 +973,17 @@ async fn read_answer(io: &mut BufReader<TcpStream>) -> std::io::Result<Answer> {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            // Every occurrence is kept, joined by a newline. A response may
+            // carry several `Set-Cookie` lines, and keeping only the last
+            // would hide a proxy that replaces the application's cookies
+            // where it must add to them.
+            headers
+                .entry(name.trim().to_ascii_lowercase())
+                .and_modify(|kept: &mut String| {
+                    kept.push('\n');
+                    kept.push_str(value.trim());
+                })
+                .or_insert_with(|| value.trim().to_owned());
         }
         if let Some(value) = line
             .to_ascii_lowercase()
@@ -906,6 +1015,18 @@ async fn read_answer(io: &mut BufReader<TcpStream>) -> std::io::Result<Answer> {
 #[must_use]
 pub fn plain_request() -> String {
     "GET / HTTP/1.1\r\nHost: ek-ek.test\r\n\r\n".to_owned()
+}
+
+/// A request that carries one cookie.
+#[must_use]
+pub fn request_with_cookie(name: &str, value: &str) -> String {
+    format!("GET / HTTP/1.1\r\nHost: ek-ek.test\r\nCookie: {name}={value}\r\n\r\n")
+}
+
+/// A request that carries a whole `Cookie` line as given.
+#[must_use]
+pub fn request_with_cookie_line(line: &str) -> String {
+    format!("GET / HTTP/1.1\r\nHost: ek-ek.test\r\nCookie: {line}\r\n\r\n")
 }
 
 /// Opens a connection, sends one request and reads the answer.

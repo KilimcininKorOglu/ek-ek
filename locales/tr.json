@@ -1,6 +1,7 @@
 {
   "config.backend.cookie_stickiness_on_udp": "'{backend}' backend havuzu çerez tabanlı oturum sürekliliği kullanıyor, ama '{frontend}' frontend'i UDP taşıyor.",
   "config.backend.no_members": "'{backend}' backend havuzunda hiç üye yok.",
+  "config.backend.stickiness_cookie_name_invalid": "'{backend}' backend havuzunun süreklilik çerezi adı, çerez adında bulunamayacak bir karakter taşıyor.",
   "config.certificate.unknown_dns_provider": "'{certificate}' sertifikası tanımlı olmayan '{provider}' DNS sağlayıcısını gösteriyor.",
   "config.duplicate_id": "Aynı {kind} kimliği birden fazla kez tanımlanmış: '{id}'.",
   "config.frontend.duplicate_binding": "'{vip}' adresinin {port} portu zaten '{conflicting_frontend}' frontend'i tarafından kullanılıyor.",
@@ -11,6 +12,7 @@
   "config.frontend.unknown_vip": "'{frontend}' frontend'i tanımlı olmayan '{vip}' VIP'ini gösteriyor.",
   "config.health_check.timeout_above_interval": "'{backend}' backend havuzunun sağlık kontrolü zaman aşımı ({timeout_ms} ms), kontrol aralığından ({interval_ms} ms) uzun.",
   "config.port.out_of_range": "{port} geçerli bir port numarası değil.",
+  "config.stickiness_key.missing": "Çerez tabanlı oturum sürekliliği açık, ama en az {shortest_bytes} baytlık bir imza anahtarı yapılandırılmamış.",
   "config.vip.in_use": "'{vip}' VIP'i {frontend_count} frontend tarafından kullanılıyor ve silinemez.",
   "config.vip.unknown_preferred_node": "'{vip}' VIP'i tanımlı olmayan '{node}' düğümünü tercih ediyor.",
   "dialog.delete.body": "'{name}' kalıcı olarak silinecek. {effect}",

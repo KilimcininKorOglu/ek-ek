@@ -86,8 +86,13 @@ pub fn sample() -> Config {
                 },
             },
         ],
+        stickiness_key: STICKINESS_KEY.to_owned(),
     }
 }
+
+/// A key long enough to pass validation. Not a secret: it exists only so a
+/// fixture that turns cookie stickiness on is a valid document.
+pub const STICKINESS_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 pub fn http_frontend() -> Frontend {
     Frontend {

@@ -1,6 +1,7 @@
 {
   "config.backend.cookie_stickiness_on_udp": "Backend pool '{backend}' uses cookie based session stickiness, but frontend '{frontend}' carries UDP.",
   "config.backend.no_members": "Backend pool '{backend}' has no members.",
+  "config.backend.stickiness_cookie_name_invalid": "The stickiness cookie name of backend pool '{backend}' carries a character a cookie name cannot hold.",
   "config.certificate.unknown_dns_provider": "Certificate '{certificate}' names DNS provider '{provider}', which is not defined.",
   "config.duplicate_id": "The same {kind} identity is defined more than once: '{id}'.",
   "config.frontend.duplicate_binding": "Port {port} on '{vip}' is already taken by frontend '{conflicting_frontend}'.",
@@ -11,6 +12,7 @@
   "config.frontend.unknown_vip": "Frontend '{frontend}' names VIP '{vip}', which is not defined.",
   "config.health_check.timeout_above_interval": "The health check timeout of backend pool '{backend}' ({timeout_ms} ms) is longer than its interval ({interval_ms} ms).",
   "config.port.out_of_range": "{port} is not a valid port number.",
+  "config.stickiness_key.missing": "Cookie based session stickiness is turned on, but no signing key of at least {shortest_bytes} bytes is configured.",
   "config.vip.in_use": "VIP '{vip}' is used by {frontend_count} frontends and cannot be removed.",
   "config.vip.unknown_preferred_node": "VIP '{vip}' prefers node '{node}', which is not defined.",
   "dialog.delete.body": "'{name}' will be removed permanently. {effect}",

@@ -42,6 +42,11 @@ tempfile = "3"
 pingora = { version = "0.8", default-features = false, features = ["rustls", "proxy", "lb"] }
 arc-swap = "1"
 async-trait = "0.1"
+# The stickiness cookie is a keyed hash, so the traffic path needs an HMAC.
+# RustCrypto rather than a TLS library's own: the crates are already in the
+# tree through chacha20poly1305 and carry no C code.
+hmac = "0.13"
+sha2 = "0.11"
 http = "1"
 # Only a test dependency: the HTTP/2 client that proves the h2c listener
 # answers. Pinned to the version pingora already builds, so it costs no extra

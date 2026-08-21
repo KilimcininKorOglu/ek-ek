@@ -78,6 +78,7 @@ pub fn config(members: u16) -> Config {
         }],
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        stickiness_key: String::new(),
     }
 }
 

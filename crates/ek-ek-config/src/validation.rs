@@ -70,6 +70,12 @@ pub enum ErrorCode {
     /// A pool behind a UDP frontend uses cookie stickiness, which needs HTTP.
     #[serde(rename = "config.backend.cookie_stickiness_on_udp")]
     BackendCookieStickinessOnUdp,
+    /// Cookie stickiness is on but no key is configured to sign with.
+    #[serde(rename = "config.stickiness_key.missing")]
+    StickinessKeyMissing,
+    /// A stickiness cookie name carries something a header cannot.
+    #[serde(rename = "config.backend.stickiness_cookie_name_invalid")]
+    BackendStickinessCookieNameInvalid,
     /// A port falls outside the usable range.
     #[serde(rename = "config.port.out_of_range")]
     PortOutOfRange,
@@ -89,7 +95,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -102,6 +108,8 @@ impl ErrorCode {
         Self::CertificateUnknownDnsProvider,
         Self::BackendNoMembers,
         Self::BackendCookieStickinessOnUdp,
+        Self::StickinessKeyMissing,
+        Self::BackendStickinessCookieNameInvalid,
         Self::PortOutOfRange,
         Self::HealthCheckTimeoutAboveInterval,
         Self::TemplateParameterMissing,
@@ -125,6 +133,10 @@ impl ErrorCode {
             Self::CertificateUnknownDnsProvider => "config.certificate.unknown_dns_provider",
             Self::BackendNoMembers => "config.backend.no_members",
             Self::BackendCookieStickinessOnUdp => "config.backend.cookie_stickiness_on_udp",
+            Self::StickinessKeyMissing => "config.stickiness_key.missing",
+            Self::BackendStickinessCookieNameInvalid => {
+                "config.backend.stickiness_cookie_name_invalid"
+            }
             Self::PortOutOfRange => "config.port.out_of_range",
             Self::HealthCheckTimeoutAboveInterval => "config.health_check.timeout_above_interval",
             Self::TemplateParameterMissing => "template.parameter.missing",
@@ -319,6 +331,8 @@ pub fn validate(config: &Config) -> Result<(), ValidationErrors> {
     check_certificates(config, &mut errors);
     check_backends(config, &mut errors);
     check_stickiness_against_transport(config, &mut errors);
+    check_stickiness_key(config, &mut errors);
+    check_stickiness_cookie_name(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -716,6 +730,105 @@ fn check_stickiness_against_transport(config: &Config, errors: &mut Vec<Validati
             .with_id("frontend", frontend.id.as_str()),
         );
     }
+}
+
+/// The shortest key accepted, in bytes.
+///
+/// A signature is only worth what the key behind it is worth. Anything under
+/// this is short enough to search, and a forged cookie would then pick the
+/// backend for the client.
+const SHORTEST_KEY: usize = 32;
+
+/// Refuses cookie stickiness that has nothing to sign with.
+///
+/// Checked only when a pool asks for it: a configuration that uses no
+/// stickiness needs no key, and demanding one would refuse a document that
+/// works.
+fn check_stickiness_key(config: &Config, errors: &mut Vec<ValidationError>) {
+    let wanted = config
+        .backends
+        .iter()
+        .any(|backend| matches!(backend.stickiness, SessionStickiness::SignedCookie { .. }));
+    if !wanted {
+        return;
+    }
+
+    let bytes = hex_length(&config.stickiness_key);
+    if bytes.is_some_and(|length| length >= SHORTEST_KEY) {
+        return;
+    }
+
+    errors.push(
+        ValidationError::new(
+            ErrorCode::StickinessKeyMissing,
+            FieldPath::root().field("stickiness_key"),
+        )
+        .with_number("shortest_bytes", SHORTEST_KEY as i64),
+    );
+}
+
+/// Returns how many bytes a hex string names, or `None` when it is not hex.
+fn hex_length(key: &str) -> Option<usize> {
+    if key.is_empty() || !key.len().is_multiple_of(2) {
+        return None;
+    }
+    if !key.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(key.len() / 2)
+}
+
+/// Refuses a cookie name that would break the header carrying it.
+///
+/// A name with a space, a semicolon or a newline in it does not produce a
+/// cookie the client rejects: it produces a `Set-Cookie` header that means
+/// something else, and a newline splits the response outright.
+fn check_stickiness_cookie_name(config: &Config, errors: &mut Vec<ValidationError>) {
+    for (at, backend) in config.backends.iter().enumerate() {
+        let SessionStickiness::SignedCookie { cookie_name, .. } = &backend.stickiness else {
+            continue;
+        };
+        if is_token(cookie_name) {
+            continue;
+        }
+
+        errors.push(
+            ValidationError::new(
+                ErrorCode::BackendStickinessCookieNameInvalid,
+                FieldPath::root()
+                    .field("backends")
+                    .index(at)
+                    .field("stickiness")
+                    .field("cookie_name"),
+            )
+            .with_id("backend", backend.id.as_str()),
+        );
+    }
+}
+
+/// Whether a string is an HTTP token, which is what a cookie name must be.
+fn is_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 fn reaches(frontend: &crate::frontend::Frontend, backend: &BackendId) -> bool {

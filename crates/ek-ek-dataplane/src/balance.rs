@@ -111,6 +111,17 @@ impl Balancer {
         Arc::clone(&self.health)
     }
 
+    /// The members of a pool that can take a request right now.
+    ///
+    /// Session stickiness needs this list rather than one choice: a cookie
+    /// naming a member that cannot take traffic has to be redistributed, and
+    /// offering that member for matching would only send the request
+    /// somewhere it cannot go.
+    #[must_use]
+    pub fn eligible<'a>(&self, pool: &'a Backend) -> Vec<&'a BackendMember> {
+        eligible(pool, &self.health)
+    }
+
     /// Chooses the member that answers this request.
     ///
     /// Returns `None` when the pool has nobody able to take it, which the
