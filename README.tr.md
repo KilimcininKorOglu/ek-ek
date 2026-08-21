@@ -40,13 +40,10 @@ Yalnızca Linux. Hedef dağıtımlar Debian, Ubuntu ve RHEL ailesi.
 
 ## Lisans
 
-Çift lisans:
-
-- [AGPL-3.0](LICENSE). Varsayılan lisans, ücretsiz. Yalnızca İngilizce metin bağlayıcıdır.
-- [Ticari lisans](LICENSE-COMMERCIAL.tr.md). Kapalı kaynak kullanım için.
+[AGPL-3.0-or-later](LICENSE). Her kullanım için ücretsiz. Yalnızca İngilizce metin bağlayıcıdır.
 
 ## Katkı
 
 Akış ve bir pull request'in geçmesi gereken denetimler için [CONTRIBUTING.tr.md](CONTRIBUTING.tr.md) dosyasına bakın.
 
-Her pull request için imzalanmış bir [Katkıda Bulunan Lisans Sözleşmesi](CLA.tr.md) gerekir. Çift lisans modeli telif hakkının tek elde toplanmasını gerektirir ve imzasız birleştirilen bir katkı bu modeli geri dönülmez biçimde bozar; bu yüzden otomatik bir denetim bunu zorlar.
+Katkılar projenin geri kalanıyla aynı lisansla gelir. İmzalanacak bir şey yok.

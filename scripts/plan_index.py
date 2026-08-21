@@ -23,7 +23,9 @@ README = ROOT / "plan" / "README.md"
 START = "<!-- GOREV-INDEKSI-BASLANGIC -->"
 END = "<!-- GOREV-INDEKSI-BITIS -->"
 
-VALID_STATES = ("todo", "devam", "bloke", "bitti")
+# "iptal" exists so a task whose reason disappeared keeps its file and its
+# number. Deleting it would erase why the work was started and dropped.
+VALID_STATES = ("todo", "devam", "bloke", "bitti", "iptal")
 HEADERS = ("ID", "Görev", "Milestone", "Durum", "Bağımlılık")
 
 TASK_ID = re.compile(r"^T-\d{3}$")
@@ -147,7 +149,9 @@ def check_milestone_order(tasks: list[dict[str, object]]) -> list[str]:
 
     for task in sorted(tasks, key=milestone_number):
         number = milestone_number(task)
-        if task["durum"] != "bitti":
+        # A cancelled task is not open work. It keeps its file to record why the
+        # work was started and dropped.
+        if task["durum"] not in ("bitti", "iptal"):
             open_before.setdefault(number, []).append(str(task["id"]))
 
     for task in tasks:

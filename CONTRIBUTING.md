@@ -4,17 +4,12 @@ Türkçe: [CONTRIBUTING.tr.md](CONTRIBUTING.tr.md)
 
 ## Before you write code
 
-**Every pull request needs a signed Contributor License Agreement**
-([CLA.md](CLA.md)). No contribution is merged without it, and this is enforced
-by an automated check rather than by memory.
+Nothing. Fork the repository, open a pull request. There is no agreement to
+sign and no sign-off to add to your commits.
 
-The reason is specific: ek-ek is released under AGPL-3.0-or-later and is also
-offered under separate commercial terms. Merging one contribution that does not
-carry the necessary rights would end the commercial license permanently, for
-everyone. Deleting the code afterwards does not undo it.
-
-Signing takes one comment on your first pull request. The check tells you the
-exact text to post. You are never asked again.
+Contributions come in under [AGPL-3.0-or-later](LICENSE), the same license the
+rest of the project uses. By opening a pull request you are offering your work
+under that license.
 
 ## Getting the project running
 

@@ -1,9 +1,9 @@
 # Dependency policy. Run with `cargo deny check`.
 #
-# The project is AGPL-3.0-or-later and is also sold under a commercial license
-# (ADR-0011). A dependency whose license cannot be combined into an AGPL work,
-# or which forces terms we cannot grant a commercial licensee, breaks that model
-# permanently. This file is the enforcement point.
+# The project is AGPL-3.0-or-later (ADR-0011, ADR-0056). A dependency whose
+# license cannot be combined into an AGPL work makes the product undistributable,
+# and finding that out at release time is too late. This file is the enforcement
+# point.
 
 [graph]
 # The product only ships on Linux (ADR-0007), so the dependency graph is
@@ -43,9 +43,10 @@ unused-allowed-license = "allow"
 
 [licenses.private]
 # Our own crates are AGPL-3.0-or-later and are marked `publish = false`, so they
-# are skipped here. AGPL is deliberately absent from the allow list above: an
-# external AGPL dependency would make the commercial license unsellable
-# (ADR-0011), so it must be rejected even though our own code carries it.
+# are skipped here. AGPL is deliberately absent from the allow list above. It is
+# no longer a legal problem now that nothing is sold under other terms
+# (ADR-0056), but a narrow allow list keeps the dependency surface visible. If a
+# needed dependency turns out to be AGPL, open it with its own decision.
 ignore = true
 
 [bans]

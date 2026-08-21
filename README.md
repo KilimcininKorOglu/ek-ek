@@ -40,13 +40,10 @@ Linux only. Target distributions are Debian, Ubuntu and the RHEL family.
 
 ## License
 
-Dual licensed:
-
-- [AGPL-3.0](LICENSE). Default license, free of charge.
-- [Commercial license](LICENSE-COMMERCIAL.md). For closed source use.
+[AGPL-3.0-or-later](LICENSE). Free of charge, for any use.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the checks a pull request has to pass.
 
-Every pull request needs a signed [Contributor License Agreement](CLA.md). The dual license model requires the copyright to be held by a single party, and merging an unsigned contribution would break that model irreversibly, so an automated check enforces it.
+Contributions come in under the same license as the rest of the project. There is nothing to sign.

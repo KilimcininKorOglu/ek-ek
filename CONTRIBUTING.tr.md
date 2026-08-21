@@ -4,17 +4,11 @@ English: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Kod yazmadan önce
 
-**Her pull request için imzalanmış bir Katkıda Bulunan Lisans Sözleşmesi
-gerekir** ([CLA.tr.md](CLA.tr.md)). İmza olmadan hiçbir katkı birleştirilmez ve
-bu, hatırlamaya değil otomatik bir denetime bağlıdır.
+Hiçbir şey. Depoyu fork'layın, pull request açın. İmzalanacak bir sözleşme ve
+commit'e eklenecek bir imza satırı yok.
 
-Sebebi belirli: ek-ek hem AGPL-3.0-or-later ile yayımlanıyor hem de ayrı ticari
-şartlarla sunuluyor. Gerekli hakları taşımayan tek bir katkının birleştirilmesi,
-ticari lisansı herkes için kalıcı olarak bitirir. Kodun sonradan silinmesi bunu
-geri almaz.
-
-İmza, ilk pull request'inizde tek bir yorumla alınır. Denetim size yazacağınız
-metni verir. Bir daha sorulmaz.
+Katkılar, projenin geri kalanıyla aynı lisansla, [AGPL-3.0-or-later](LICENSE)
+ile gelir. Pull request açarak çalışmanızı bu lisansla sunmuş olursunuz.
 
 ## Projeyi ayağa kaldırma
 

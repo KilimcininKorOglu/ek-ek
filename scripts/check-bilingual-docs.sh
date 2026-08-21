@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Warn when one half of a bilingual document pair changed without the other.
 #
-# The commercial terms exist in two languages (ADR-0049). Updating one and
-# leaving the other publishes two different sets of terms. This check cannot
-# verify that the contents match, only that both files moved together.
+# Every document the project writes ships in two languages (ADR-0049).
+# Updating one and leaving the other publishes two different documents. This
+# check cannot verify that the contents match, only that both files moved
+# together.
 #
 # It warns and exits 0 on purpose: splitting a translation into a follow-up
 # commit is a legitimate workflow, and failing the build would block it.
@@ -16,8 +17,6 @@ readonly BASE="${1:-HEAD~1}"
 
 readonly PAIRS=(
     "README.md:README.tr.md"
-    "LICENSE-COMMERCIAL.md:LICENSE-COMMERCIAL.tr.md"
-    "CLA.md:CLA.tr.md"
     "CONTRIBUTING.md:CONTRIBUTING.tr.md"
 )
 
