@@ -1,0 +1,28 @@
+# Development image for the three node cluster.
+#
+# VRRP, multicast and netlink only work on Linux, and development happens on
+# macOS. This image carries just enough tooling to prove those preconditions.
+FROM debian:bookworm-slim
+
+# iproute2      -> ip addr add, proves CAP_NET_ADMIN
+# tcpdump       -> capture multicast on the receiving node
+# python3       -> open a raw socket on IP protocol 112, what VRRP actually uses
+# util-linux    -> setpriv, to drop to the host user while keeping capabilities
+# iputils-ping  -> node to node reachability
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        iproute2 \
+        iputils-ping \
+        procps \
+        python3 \
+        tcpdump \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# The container idles. Tests run through `docker compose exec`, so a node can be
+# inspected between commands instead of disappearing with its process.
+CMD ["sleep", "infinity"]

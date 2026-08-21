@@ -1,0 +1,93 @@
+# Three node development cluster on one bridge network.
+#
+# Addresses are fixed and written here rather than assigned by Docker, because
+# VRRP peers are configured as a unicast list and a moving address would make
+# every test rewrite its own configuration.
+#
+# The nodes run as root. Docker grants added capabilities to the root user only;
+# it does not set ambient capabilities, so a non-root process would lose
+# CAP_NET_ADMIN the moment it started. In production systemd grants them
+# ambiently to a non-root service user instead (T-060). Where a test writes into
+# docker-data it drops to the host user with setpriv, so the bind mount does not
+# fill up with root owned files.
+
+name: ek-ek
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.dev
+  image: ek-ek-dev:latest
+  cap_add:
+    # Add a VIP to an interface and delete it again.
+    - NET_ADMIN
+    # Open a raw socket for VRRP advertisements and gratuitous ARP.
+    - NET_RAW
+  environment:
+    HOST_UID: ${HOST_UID:-1000}
+    HOST_GID: ${HOST_GID:-1000}
+  restart: "no"
+
+services:
+  node1:
+    <<: *node
+    container_name: ek-ek-node1
+    hostname: node1
+    volumes:
+      - ../docker-data/node1:/var/lib/ek-ek
+    networks:
+      lab:
+        ipv4_address: 172.28.0.11
+
+  node2:
+    <<: *node
+    container_name: ek-ek-node2
+    hostname: node2
+    volumes:
+      - ../docker-data/node2:/var/lib/ek-ek
+    networks:
+      lab:
+        ipv4_address: 172.28.0.12
+
+  node3:
+    <<: *node
+    container_name: ek-ek-node3
+    hostname: node3
+    volumes:
+      - ../docker-data/node3:/var/lib/ek-ek
+    networks:
+      lab:
+        ipv4_address: 172.28.0.13
+
+  backend1:
+    image: nginx:1.27-alpine
+    container_name: ek-ek-backend1
+    hostname: backend1
+    restart: "no"
+    volumes:
+      - ../docker-data/backend1:/usr/share/nginx/html:ro
+    networks:
+      lab:
+        ipv4_address: 172.28.0.21
+
+  backend2:
+    image: nginx:1.27-alpine
+    container_name: ek-ek-backend2
+    hostname: backend2
+    restart: "no"
+    volumes:
+      - ../docker-data/backend2:/usr/share/nginx/html:ro
+    networks:
+      lab:
+        ipv4_address: 172.28.0.22
+
+networks:
+  lab:
+    name: ek-ek-lab
+    driver: bridge
+    ipam:
+      config:
+        # 172.28.0.100 to 172.28.0.110 is left unassigned and reserved for VIP
+        # tests. Nothing else may take an address from that range.
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1

@@ -6,6 +6,8 @@
 # Yerel ortam ve sırlar
 .env
 .env.*
+# Şablon dosyası değer taşımaz ve depoda bulunmak zorundadır.
+!.env.example
 *.pem
 *.key
 *.p12

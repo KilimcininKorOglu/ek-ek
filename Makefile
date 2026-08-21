@@ -67,27 +67,61 @@ check-docs: ## Warn when one half of a bilingual pair changed alone
 ci: fmt-check lint deny check-headers check-apis check-docs test ## Run every check CI runs
 	@echo "ci: all checks passed"
 
-# --- Development environment (filled in by the docker environment task) ------
+# --- Development environment ------------------------------------------------
+
+COMPOSE := docker compose -f docker/compose.yml
+DATA := docker-data
+NODES := node1 node2 node3
+BACKENDS := backend1 backend2
+
+.PHONY: dev-env
+dev-env: ## Create .env and the docker-data directories if they are missing
+	@if [ ! -f .env ]; then \
+		sed -e "s/^HOST_UID=$$/HOST_UID=$$(id -u)/" \
+		    -e "s/^HOST_GID=$$/HOST_GID=$$(id -g)/" \
+		    .env.example > .env; \
+		echo "created .env from .env.example"; \
+		echo "set EK_EK_ADMIN_PASSWORD in .env before bootstrapping a cluster"; \
+	fi
+	@mkdir -p $(addprefix $(DATA)/,$(NODES) $(BACKENDS))
+	@for b in $(BACKENDS); do \
+		if [ ! -f $(DATA)/$$b/index.html ]; then \
+			echo "$$b" > $(DATA)/$$b/index.html; \
+		fi; \
+	done
 
 .PHONY: dev-up
-dev-up: ## (pending) Start the three node development cluster
-	@echo "dev-up is not implemented yet"
-	@exit 1
+dev-up: dev-env ## Start the three node development cluster
+	$(COMPOSE) up -d --build
+	@echo "cluster is up; run 'make dev-verify' to check its preconditions"
 
 .PHONY: dev-down
-dev-down: ## (pending) Stop the cluster and remove its network
-	@echo "dev-down is not implemented yet"
-	@exit 1
+dev-down: ## Stop the cluster and remove its network, keeping docker-data
+	$(COMPOSE) down --remove-orphans
 
 .PHONY: dev-logs
-dev-logs: ## (pending) Follow logs from the development cluster
-	@echo "dev-logs is not implemented yet"
-	@exit 1
+dev-logs: ## Follow logs from the development cluster
+	$(COMPOSE) logs -f
 
+.PHONY: dev-verify
+dev-verify: ## Prove the preconditions the product depends on
+	$(SCRIPTS)/verify-dev-env.sh
+
+# Destructive: it deletes the persistent development data. It says what it will
+# remove and waits for confirmation, because a wrong keystroke here costs a
+# cluster that took several manual steps to build.
 .PHONY: dev-reset
-dev-reset: ## (pending) Delete docker-data and rebuild the cluster from scratch
-	@echo "dev-reset is not implemented yet"
-	@exit 1
+dev-reset: ## Delete docker-data and rebuild the cluster from scratch
+	@echo "This deletes the development cluster and everything under $(DATA)/:"
+	@for d in $(NODES) $(BACKENDS); do \
+		printf '  %s (%s)\n' "$(DATA)/$$d" "$$(du -sh $(DATA)/$$d 2>/dev/null | cut -f1 || echo missing)"; \
+	done
+	@read -r -p "Type 'sil' to confirm: " answer; \
+	if [ "$$answer" != "sil" ]; then echo "cancelled"; exit 1; fi; \
+	$(COMPOSE) down -v --remove-orphans; \
+	rm -rf $(DATA)
+	@$(MAKE) --no-print-directory dev-up
+	@echo "cluster rebuilt from scratch"
 
 .PHONY: dev-test
 dev-test: ## (pending) Run integration tests inside the docker environment
