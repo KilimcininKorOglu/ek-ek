@@ -10,6 +10,18 @@ description = "Traffic path: HTTP, TCP and UDP proxying, TLS termination, health
 
 # Must never depend on ek-ek-vrrp (ADR-0014).
 [dependencies]
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
+ek-ek-config = { workspace = true }
+ek-ek-ipc = { workspace = true }
+pingora = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+ek-ek-ipc = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true

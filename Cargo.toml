@@ -37,6 +37,14 @@ chacha20poly1305 = "0.11"
 getrandom = "0.4"
 tempfile = "3"
 
+# rustls rather than the default OpenSSL build, so no system TLS library has
+# to be present to compile the traffic path.
+pingora = { version = "0.8", default-features = false, features = ["rustls", "proxy", "lb"] }
+arc-swap = "1"
+async-trait = "0.1"
+http = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
 # Layer boundaries are enforced by the dependency direction between crates.
 # ek-ek-config depends on no workspace crate.
 # ek-ek-dataplane and ek-ek-vrrp never depend on each other.

@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -30,7 +30,14 @@ enum Command {
     NodeAgent,
 
     /// Run the traffic path. Started by node-agent, not meant to be run directly
-    DataPlane,
+    DataPlane(DataPlaneArgs),
+}
+
+#[derive(Args)]
+struct DataPlaneArgs {
+    /// Unix socket the node agent listens on
+    #[arg(long, default_value = ek_ek_ipc::SOCKET_PATH)]
+    agent_socket: String,
 }
 
 fn main() -> ExitCode {
@@ -40,10 +47,42 @@ fn main() -> ExitCode {
         Command::NodeAgent => {
             println!("node-agent is not implemented yet");
         }
-        Command::DataPlane => {
-            println!("data-plane is not implemented yet");
-        }
+        Command::DataPlane(args) => return run_data_plane(&args),
     }
 
     ExitCode::SUCCESS
+}
+
+/// Starts the traffic path.
+///
+/// The agent has to be there. Without it there is no configuration, and a
+/// process serving nothing looks exactly like a node that was never
+/// configured, which is the one failure an operator must not have to guess at.
+fn run_data_plane(args: &DataPlaneArgs) -> ExitCode {
+    let link = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(ek_ek_dataplane::AgentLink::establish(&args.agent_socket)),
+        Err(error) => {
+            eprintln!("data-plane: a runtime could not be started: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let link = match link {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("data-plane: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match ek_ek_dataplane::build(link) {
+        Ok(server) => server.run_forever(),
+        Err(error) => {
+            eprintln!("data-plane: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

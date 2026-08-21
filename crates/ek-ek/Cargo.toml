@@ -13,7 +13,14 @@ name = "ek-ek"
 path = "src/main.rs"
 
 [dependencies]
-clap.workspace = true
+clap = { workspace = true }
+ek-ek-dataplane = { workspace = true }
+ek-ek-ipc = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

@@ -16,7 +16,31 @@ targets = [
 [advisories]
 # A known vulnerability or a yanked crate fails the check. Every exception is
 # listed here with a reason, so silent exceptions cannot accumulate.
-ignore = []
+#
+# All four entries below arrive through pingora 0.8.1, which is its latest
+# release, so none of them has an upgrade path from here. They are revisited
+# on every pingora release; see the risk register.
+ignore = [
+    # Reachability: prometheus 0.13.4 links protobuf only to write the
+    # protobuf exposition format. Its 21 source files contain no
+    # `parse_from`, `merge_from` or `CodedInputStream` call, and pingora
+    # reaches it through `TextEncoder`, not `ProtobufEncoder`. The advisory
+    # is uncontrolled recursion while parsing attacker-supplied input, and
+    # nothing here parses protobuf. Fixed in protobuf 3.7.2, which
+    # prometheus 0.13 (`protobuf = "^2.0"`) cannot take.
+    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.28.0 parse path is never called; pingora encodes only" },
+    # Unmaintained, not a vulnerability. pingora calls it only for its
+    # `--daemon` flag. The product runs in the foreground under systemd, and
+    # `Server::new(None)` passes no options, so the flag is never set.
+    { id = "RUSTSEC-2025-0069", reason = "daemonize unmaintained; the daemon path is never taken" },
+    # Unmaintained, not a vulnerability. A proc-macro that only generates
+    # derive code at compile time, so it has no runtime surface.
+    { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; compile-time only" },
+    # Unmaintained, not a vulnerability. It reads certificate and key files
+    # from disk, which are our own files rather than network input. The
+    # replacement lives in rustls-pki-types and needs a pingora change.
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; reads our own files, not network input" },
+]
 
 [licenses]
 # Only licenses whose code can be combined into an AGPL-3.0 work.

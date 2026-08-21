@@ -17,3 +17,13 @@
 //!
 //! Every configuration change must preserve open connections. Apply new
 //! configuration only to new connections.
+
+pub mod error;
+pub mod link;
+pub mod live;
+pub mod server;
+
+pub use error::{Error, ErrorKind, Result};
+pub use link::{AgentLink, RECONNECT_DELAY, STATUS_INTERVAL};
+pub use live::{Live, LiveConfig, Status};
+pub use server::{Binding, Endpoint, bindings, build};

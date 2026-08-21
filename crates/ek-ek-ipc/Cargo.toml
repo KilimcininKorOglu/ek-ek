@@ -9,6 +9,12 @@ publish = false
 description = "Unix socket protocol between node-agent and data-plane"
 
 [dependencies]
+ek-ek-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
