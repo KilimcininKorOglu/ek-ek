@@ -63,8 +63,16 @@ check-apis: ## Reject browser APIs the project has ruled out
 check-docs: ## Warn when one half of a bilingual pair changed alone
 	$(SCRIPTS)/check-bilingual-docs.sh
 
+.PHONY: check-secrets
+check-secrets: ## Refuse credentials in tracked files
+	$(SCRIPTS)/check-secrets.sh
+
+.PHONY: check-layering
+check-layering: ## Enforce the crate dependency direction
+	$(SCRIPTS)/check-layering.sh
+
 .PHONY: ci
-ci: fmt-check lint deny check-headers check-apis check-docs test ## Run every check CI runs
+ci: fmt-check lint deny check-headers check-apis check-docs check-secrets check-layering test ## Run every check CI runs
 	@echo "ci: all checks passed"
 
 # --- Development environment ------------------------------------------------

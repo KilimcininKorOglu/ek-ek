@@ -1,0 +1,78 @@
+name: ci
+
+# Runs on direct pushes to main as well as pull requests. A check that only
+# guards pull requests is skipped by the one commit that most needs it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # No incremental artifacts, so a check cannot pass on stale output.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  checks:
+    name: quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The secret scan and the bilingual pair check both read history.
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml decides the version; nothing here repeats it.
+        run: |
+          rustup show active-toolchain
+          rustc --version
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # One target, so a check cannot exist locally and be missing here.
+      - name: make ci
+        run: make ci
+
+  integration:
+    name: docker integration environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner must allow NET_ADMIN and NET_RAW inside containers, and
+      # multicast has to cross the bridge network. If this job fails on the
+      # hosted runner, ADR-0012 needs revisiting and a self-hosted runner
+      # becomes the fallback.
+      - name: Start the cluster
+        run: make dev-up
+
+      - name: Verify the preconditions
+        run: make dev-verify
+
+      - name: Tear the cluster down
+        if: always()
+        run: make dev-down
