@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use ek_ek_config::{
     ApplicationProtocol, Backend, BackendId, BackendMember, Config, ConnectionPooling, Frontend,
-    FrontendId, LoadBalancingAlgorithm, MemberId, NodeId, NodeRole, ProxyProtocol, SchemaVersion,
-    SessionStickiness, TransportProtocol, Vip, VipId,
+    FrontendId, Http2, LoadBalancingAlgorithm, MemberId, NodeId, NodeRole, ProxyProtocol,
+    SchemaVersion, SessionStickiness, TransportProtocol, Vip, VipId,
 };
 use ek_ek_ipc::{AgentMessage, ConfigUpdate, DataPlaneMessage, decode, encode};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -54,6 +54,9 @@ pub fn config(members: u16) -> Config {
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
             default_backend: Some(BackendId::new("web")),
+            http2: Http2::Enabled,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 60,
             drain_timeout_seconds: 5,
         }],
         backends: vec![Backend {

@@ -53,8 +53,8 @@ pub use certificate::{
 };
 pub use config::{Config, SchemaVersion};
 pub use frontend::{
-    ApplicationProtocol, Frontend, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction, SniRule,
-    TlsPolicyLevel, TlsSettings, TransportProtocol,
+    ApplicationProtocol, Frontend, Http2, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction,
+    SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol,
 };
 pub use health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
 pub use i18n::{Catalog, Dialog, DialogKeys};

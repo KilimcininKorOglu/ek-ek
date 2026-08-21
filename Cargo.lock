@@ -727,6 +727,8 @@ dependencies = [
  "clap",
  "ek-ek-dataplane",
  "ek-ek-ipc",
+ "h2",
+ "http",
  "tempfile",
  "tokio",
 ]

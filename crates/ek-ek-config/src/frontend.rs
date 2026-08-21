@@ -52,6 +52,24 @@ pub struct Frontend {
     /// With no default set, a request that matches no rule is rejected and a
     /// passthrough connection is closed.
     pub default_backend: Option<BackendId>,
+    /// Whether cleartext HTTP/2 is accepted alongside HTTP/1.1 (ADR-0059).
+    #[serde(default)]
+    pub http2: Http2,
+    /// How long the proxy waits for a backend to accept a connection, in
+    /// seconds.
+    ///
+    /// This is separate from the request limit because the two are on
+    /// different scales: an unreachable member is known in seconds, while a
+    /// legitimate request may run for hours.
+    pub connect_timeout_seconds: u32,
+    /// How long a request may take before the client is told it timed out, in
+    /// seconds (ADR-0058).
+    ///
+    /// A routing rule carrying its own value overrides this one. Zero means
+    /// no limit, which is a deliberate choice rather than an unset field:
+    /// ActiveSync push and IMAP IDLE hold a request open for an hour or more,
+    /// and some deployments want no ceiling at all.
+    pub request_timeout_seconds: u32,
     /// How long the frontend waits before it cuts what is left, in seconds.
     ///
     /// On TCP this is the time open connections get to finish. On UDP there
@@ -126,6 +144,31 @@ pub enum ProxyProtocol {
     V1,
     /// Binary header.
     V2,
+}
+
+/// Whether a frontend accepts cleartext HTTP/2 (ADR-0059).
+///
+/// The setting exists per frontend because turning it off is sometimes the
+/// only way to keep a backend working, and an operator must be able to do that
+/// on one published service without touching the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Http2 {
+    /// Accepts HTTP/2 when the client asks for it and HTTP/1.1 otherwise. This
+    /// is the default: the two are told apart by the connection preface, so an
+    /// HTTP/1.1 client is unaffected.
+    #[default]
+    Enabled,
+    /// Answers only HTTP/1.1, whatever the client asks for.
+    Disabled,
+}
+
+impl Http2 {
+    /// Returns whether cleartext HTTP/2 is accepted.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
 }
 
 /// One host and path rule.

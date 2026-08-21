@@ -43,6 +43,10 @@ pingora = { version = "0.8", default-features = false, features = ["rustls", "pr
 arc-swap = "1"
 async-trait = "0.1"
 http = "1"
+# Only a test dependency: the HTTP/2 client that proves the h2c listener
+# answers. Pinned to the version pingora already builds, so it costs no extra
+# compilation.
+h2 = "0.4"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 # Layer boundaries are enforced by the dependency direction between crates.

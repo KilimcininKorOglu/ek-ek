@@ -15,63 +15,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ek_ek_config::{ApplicationProtocol, Config, TransportProtocol};
 use ek_ek_ipc::DataPlaneState;
-use pingora::apps::http_app::ServeHttp;
-use pingora::protocols::http::ServerSession;
+use pingora::apps::HttpServerOptions;
 use pingora::server::{Server, ShutdownWatch};
 use pingora::services::background::background_service;
-use pingora::services::listening::Service;
 
+use crate::balance::Balancer;
 use crate::error::{Error, ErrorKind, Result};
 use crate::link::AgentLink;
-use crate::live::{LiveConfig, Status};
-
-/// Answers a request from the live configuration.
-///
-/// Real proxying arrives with the HTTP and TCP paths. What this does now is
-/// prove the shape: one snapshot is taken per request and the request is
-/// finished on it, whatever happens to the configuration meanwhile.
-#[derive(Debug)]
-pub struct Endpoint {
-    live: Arc<LiveConfig>,
-    status: Arc<Status>,
-}
-
-impl Endpoint {
-    /// Builds an endpoint serving from this configuration.
-    #[must_use]
-    pub fn new(live: Arc<LiveConfig>, status: Arc<Status>) -> Self {
-        Self { live, status }
-    }
-}
-
-#[async_trait]
-impl ServeHttp for Endpoint {
-    async fn response(&self, _session: &mut ServerSession) -> http::Response<Vec<u8>> {
-        // One read, held for the whole request. Reading twice would let a
-        // swap land in between and answer half the request from each.
-        let live = self.live.load();
-        self.status.request_handled();
-
-        let body = format!(
-            "generation={}\nbackends={}\n",
-            live.generation,
-            live.config.backends.len()
-        );
-
-        http::Response::builder()
-            .status(200)
-            .header(http::header::CONTENT_TYPE, "text/plain")
-            .header(http::header::CONTENT_LENGTH, body.len())
-            .body(body.into_bytes())
-            .unwrap_or_else(|_| {
-                // Every part above is a constant, so this cannot fail. An
-                // empty 500 is still better than a panic on the traffic path.
-                let mut fallback = http::Response::new(Vec::new());
-                *fallback.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
-                fallback
-            })
-    }
-}
+use crate::proxy::Proxy;
 
 /// Where a frontend listens.
 ///
@@ -83,6 +34,8 @@ pub struct Binding {
     pub frontend: String,
     /// The address in `host:port` form.
     pub address: String,
+    /// Whether this listener accepts cleartext HTTP/2 (ADR-0059).
+    pub http2: bool,
 }
 
 /// Works out what a configuration says to listen on.
@@ -126,6 +79,7 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
         bindings.push(Binding {
             frontend: frontend.id.as_str().to_owned(),
             address: format!("{}:{}", vip.address, frontend.port),
+            http2: frontend.http2.is_enabled(),
         });
     }
 
@@ -153,15 +107,36 @@ pub fn build(link: AgentLink) -> Result<Server> {
     })?;
     server.bootstrap();
 
+    // One balancer for the whole process. The open connection counts belong
+    // to what this process is doing, not to a configuration, so they survive
+    // every swap.
+    let balancer = Arc::new(Balancer::new());
+
     let bindings = bindings(&live.load().config)?;
     for binding in bindings {
-        let mut service = Service::new(
-            format!("frontend {}", binding.frontend),
-            pingora::apps::http_app::HttpServer::new_app(Endpoint::new(
-                Arc::clone(&live),
-                Arc::clone(&status),
-            )),
+        let proxy = Proxy::new(
+            binding.frontend.clone(),
+            Arc::clone(&live),
+            Arc::clone(&status),
+            Arc::clone(&balancer),
         );
+        let mut service = pingora::proxy::http_proxy_service_with_name(
+            &server.configuration,
+            proxy,
+            &format!("frontend {}", binding.frontend),
+        );
+
+        // Cleartext HTTP/2 is told apart from HTTP/1.1 by the connection
+        // preface, so turning it on leaves HTTP/1.1 clients untouched
+        // (ADR-0059).
+        // The struct is non-exhaustive, so it is built by default and then
+        // adjusted rather than written out field by field.
+        let mut options = HttpServerOptions::default();
+        options.h2c = binding.http2;
+        if let Some(logic) = service.app_logic_mut() {
+            logic.server_options = Some(options);
+        }
+
         service.add_tcp(&binding.address);
         server.add_service(service);
     }

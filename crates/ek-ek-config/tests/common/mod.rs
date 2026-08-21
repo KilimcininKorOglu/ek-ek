@@ -14,7 +14,7 @@ use ek_ek_config::{
     AdminState, ApplicationProtocol, Backend, BackendId, BackendMember, Certificate, CertificateId,
     CertificateSource, CertificateValidity, Config, ConnectionPooling, DnsProvider,
     DnsProviderConnection, DnsProviderId, DnsRecordType, Frontend, FrontendId, HealthCheck,
-    HealthProbe, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, ProbePayload,
+    HealthProbe, Http2, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, ProbePayload,
     ProxyProtocol, RoutingRule, RuleAction, SameSitePolicy, SchemaVersion, SecretId,
     SessionStickiness, SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol, TsigAlgorithm, Vip,
     VipId,
@@ -129,6 +129,9 @@ pub fn http_frontend() -> Frontend {
         ],
         sni_rules: Vec::new(),
         default_backend: Some(BackendId::new("web")),
+        http2: Http2::Enabled,
+        connect_timeout_seconds: 5,
+        request_timeout_seconds: 60,
         drain_timeout_seconds: 30,
     }
 }
@@ -148,6 +151,9 @@ pub fn passthrough_frontend() -> Frontend {
             backend: BackendId::new("passthrough"),
         }],
         default_backend: Some(BackendId::new("passthrough")),
+        http2: Http2::Enabled,
+        connect_timeout_seconds: 5,
+        request_timeout_seconds: 60,
         drain_timeout_seconds: 60,
     }
 }
@@ -164,6 +170,9 @@ pub fn dns_tcp_frontend() -> Frontend {
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(BackendId::new("dns")),
+        http2: Http2::Enabled,
+        connect_timeout_seconds: 5,
+        request_timeout_seconds: 60,
         drain_timeout_seconds: 10,
     }
 }
@@ -180,6 +189,9 @@ pub fn dns_udp_frontend() -> Frontend {
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(BackendId::new("dns")),
+        http2: Http2::Enabled,
+        connect_timeout_seconds: 5,
+        request_timeout_seconds: 60,
         drain_timeout_seconds: 10,
     }
 }

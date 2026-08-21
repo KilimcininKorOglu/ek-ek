@@ -45,7 +45,7 @@ use crate::backend::{
 use crate::certificate::{Certificate, CertificateSource};
 use crate::config::Config;
 use crate::frontend::{
-    ApplicationProtocol, Frontend, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction,
+    ApplicationProtocol, Frontend, Http2, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction,
     TlsSettings, TransportProtocol,
 };
 use crate::health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
@@ -725,6 +725,9 @@ fn build_website(
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
             default_backend: Some(backend),
+            http2: Http2::Enabled,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 60,
             drain_timeout_seconds: 30,
         },
     );
@@ -760,6 +763,9 @@ fn build_website(
             sni_rules: Vec::new(),
             // Nothing to fall through to: every request is answered.
             default_backend: None,
+            http2: Http2::Enabled,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 60,
             drain_timeout_seconds: 10,
         },
     );
@@ -812,6 +818,10 @@ fn build_dns(config: &mut Config, created: &mut Vec<Created>, values: &Common<'_
                 routing_rules: Vec::new(),
                 sni_rules: Vec::new(),
                 default_backend: Some(backend.clone()),
+                http2: Http2::Enabled,
+                connect_timeout_seconds: 5,
+                // Raw traffic carries no request to time out.
+                request_timeout_seconds: 0,
                 drain_timeout_seconds: 10,
             },
         );
@@ -923,6 +933,9 @@ fn build_exchange(
             routing_rules: rules,
             sni_rules: Vec::new(),
             default_backend: Some(owa),
+            http2: Http2::Enabled,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 60,
             drain_timeout_seconds: 60,
         },
     );
@@ -1005,6 +1018,10 @@ fn raw_frontend(
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(backend),
+        http2: Http2::Enabled,
+        connect_timeout_seconds: 5,
+        // Raw traffic carries no request to time out.
+        request_timeout_seconds: 0,
         drain_timeout_seconds: 30,
     }
 }

@@ -11,12 +11,16 @@
 //! There is no half-applied state to observe, because there is no partial
 //! update: a delivery replaces the whole thing or nothing at all.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use ek_ek_config::{Config, ValidationErrors, validate};
 use ek_ek_ipc::{ConfigUpdate, Counters, DataPlaneState, StatusReport};
+
+use crate::balance::ring_for;
+use crate::hashring::HashRing;
 
 /// A configuration together with the delivery it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +29,35 @@ pub struct Live {
     pub generation: u64,
     /// What to serve.
     pub config: Config,
+    /// One consistent hashing ring per pool, keyed by pool identity.
+    ///
+    /// Built here rather than per request, because building a ring walks
+    /// every member 160 times. It swaps together with the configuration it
+    /// belongs to, so a request never reads a ring built from a different
+    /// member list than the one it is choosing from.
+    pub rings: BTreeMap<String, HashRing>,
+}
+
+impl Live {
+    /// Builds the rings that go with a configuration.
+    fn build(generation: u64, config: Config) -> Self {
+        let rings = config
+            .backends
+            .iter()
+            .map(|pool| (pool.id.as_str().to_owned(), ring_for(pool)))
+            .collect();
+        Self {
+            generation,
+            config,
+            rings,
+        }
+    }
+
+    /// Returns the ring of a pool, or an empty one when the pool is unknown.
+    #[must_use]
+    pub fn ring(&self, pool: &str) -> HashRing {
+        self.rings.get(pool).cloned().unwrap_or_default()
+    }
 }
 
 /// Holds the live configuration and swaps it atomically.
@@ -35,10 +68,10 @@ impl LiveConfig {
     /// Starts from a delivery that has already been checked.
     #[must_use]
     pub fn new(update: ConfigUpdate) -> Self {
-        Self(ArcSwap::from_pointee(Live {
-            generation: update.generation,
-            config: update.config,
-        }))
+        Self(ArcSwap::from_pointee(Live::build(
+            update.generation,
+            update.config,
+        )))
     }
 
     /// Takes the snapshot to serve one request from.
@@ -65,10 +98,8 @@ impl LiveConfig {
     /// untouched in that case, so a bad delivery costs nothing.
     pub fn apply(&self, update: ConfigUpdate) -> Result<(), ValidationErrors> {
         validate(&update.config)?;
-        self.0.store(Arc::new(Live {
-            generation: update.generation,
-            config: update.config,
-        }));
+        self.0
+            .store(Arc::new(Live::build(update.generation, update.config)));
         Ok(())
     }
 }

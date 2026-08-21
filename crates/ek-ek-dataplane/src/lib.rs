@@ -18,12 +18,18 @@
 //! Every configuration change must preserve open connections. Apply new
 //! configuration only to new connections.
 
+pub mod balance;
 pub mod error;
+pub mod hashring;
 pub mod link;
 pub mod live;
+pub mod proxy;
 pub mod server;
 
+pub use balance::{Balancer, ring_for};
 pub use error::{Error, ErrorKind, Result};
+pub use hashring::{HashRing, hash};
 pub use link::{AgentLink, RECONNECT_DELAY, STATUS_INTERVAL};
 pub use live::{Live, LiveConfig, Status};
-pub use server::{Binding, Endpoint, bindings, build};
+pub use proxy::Proxy;
+pub use server::{Binding, bindings, build};
