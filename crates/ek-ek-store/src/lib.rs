@@ -30,6 +30,14 @@
 //! [`MAX_VERSIONS`] versions are kept and older ones are removed with a note
 //! of what went.
 //!
+//! # Schema
+//!
+//! A stored record carries the schema it was written against. Opening a store
+//! brings an older record forward through the steps in
+//! [`migration::MIGRATIONS`], after taking a backup. A record from a newer
+//! release stops the store rather than being read field by field, because
+//! upgrades are rolling and a node will meet one (ADR-0019).
+//!
 //! # Secrets
 //!
 //! The config model holds only a `SecretId`. The bytes behind that identity
@@ -41,6 +49,7 @@ pub mod crypto;
 pub mod diff;
 pub mod error;
 pub mod master_key;
+pub mod migration;
 pub mod secret;
 pub mod sqlite;
 pub mod store;
@@ -50,6 +59,9 @@ pub use crypto::Sealed;
 pub use diff::{ConfigDiff, DiffEntry, ObjectChange, ObjectKind, diff};
 pub use error::{Error, ErrorKind, Result};
 pub use master_key::{KEY_LENGTH, KEY_MODE, MASTER_KEY_FILE, MasterKey};
+pub use migration::{
+    MIGRATIONS, Migration, document_version, migrate_document, migrate_into_config, target_version,
+};
 pub use secret::Secret;
 pub use sqlite::{DATABASE_FILE, DEFAULT_DATA_DIRECTORY, SqliteStore};
 pub use store::{Snapshot, Store};

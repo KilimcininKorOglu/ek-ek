@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "legacy_setting": "a field a later schema drops",
+  "nodes": [],
+  "vips": [
+    {
+      "id": "vip-web",
+      "address": "10.0.0.100",
+      "prefix_length": 24,
+      "interface": "eth0",
+      "preferred_node": null
+    }
+  ],
+  "frontends": [],
+  "backends": [],
+  "certificates": [],
+  "dns_providers": []
+}

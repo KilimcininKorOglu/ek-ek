@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "id": "node1",
+      "address": "10.0.0.11",
+      "roles": ["control_plane", "data_plane"]
+    }
+  ],
+  "vips": [
+    {
+      "id": "vip-web",
+      "address": "10.0.0.100",
+      "prefix_length": 24,
+      "interface": "eth0",
+      "preferred_node": "node1"
+    }
+  ],
+  "frontends": [],
+  "backends": [],
+  "certificates": [],
+  "dns_providers": []
+}

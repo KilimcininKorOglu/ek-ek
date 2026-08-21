@@ -19,6 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use crate::crypto::{Sealed, open, seal};
 use crate::error::{Error, ErrorKind, Result};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
+use crate::migration::{MIGRATIONS, Migration, migrate_document, target_version};
 use crate::secret::Secret;
 use crate::store::{Snapshot, Store};
 use crate::version::{
@@ -38,6 +39,9 @@ pub const DEFAULT_DATA_DIRECTORY: &str = "/var/lib/ek-ek";
 /// Name of the database inside the data directory.
 pub const DATABASE_FILE: &str = "config.db";
 
+/// What a pre-migration backup file is called before its schema and time.
+pub const BACKUP_PREFIX: &str = "backup-schema-";
+
 /// Permissions the data directory carries.
 const DIRECTORY_MODE: u32 = 0o700;
 
@@ -50,6 +54,12 @@ pub struct SqliteStore {
     connection: Mutex<Connection>,
     key: MasterKey,
     directory: PathBuf,
+    /// The schema this store reached when it opened.
+    ///
+    /// It is the migration steps' target rather than [`SchemaVersion::CURRENT`],
+    /// because a build carrying steps reads further than the schema it writes
+    /// by default.
+    target: SchemaVersion,
 }
 
 impl SqliteStore {
@@ -61,6 +71,19 @@ impl SqliteStore {
     /// Refuses to start when a database exists without its master key, rather
     /// than quietly presenting an empty state as if nothing had been stored.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_migrations(directory, MIGRATIONS)
+    }
+
+    /// Opens the store, bringing an older record forward through `steps`.
+    ///
+    /// The step list is a parameter so a test can prove the runner works
+    /// without a fake step ever shipping in [`MIGRATIONS`].
+    ///
+    /// # Errors
+    ///
+    /// Refuses to start when a database exists without its master key, and
+    /// when a record was written against a schema newer than `steps` reach.
+    pub fn open_with_migrations(directory: impl AsRef<Path>, steps: &[Migration]) -> Result<Self> {
         let directory = directory.as_ref().to_path_buf();
 
         fs::create_dir_all(&directory).map_err(|error| {
@@ -110,9 +133,129 @@ impl SqliteStore {
             connection: Mutex::new(connection),
             key,
             directory,
+            target: target_version(steps),
         };
         store.prepare()?;
+        store.bring_forward(steps)?;
         Ok(store)
+    }
+
+    /// Reads the schema the stored config was written against.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record cannot be read.
+    pub fn stored_schema_version(&self) -> Result<Option<SchemaVersion>> {
+        let connection = self.connection()?;
+        let stored: Option<i64> = connection
+            .query_row(
+                "SELECT schema_version FROM config_state WHERE id = ?1",
+                [STATE_ROW],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage("the stored schema version could not be read"))?;
+        drop(connection);
+
+        stored
+            .map(|value| {
+                u32::try_from(value).map(SchemaVersion::new).map_err(|_| {
+                    Error::new(
+                        ErrorKind::Serialisation,
+                        format!("a stored schema version of {value} cannot be read"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// Copies the database somewhere safe before a migration touches it.
+    ///
+    /// The copy goes through SQLite's own backup, so it holds what the
+    /// write-ahead log holds as well. Copying the file by hand would leave
+    /// out everything committed since the last checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the copy cannot be made.
+    pub fn back_up(&self, from: SchemaVersion) -> Result<PathBuf> {
+        let stamp = seconds_since_epoch()?;
+        let path = self
+            .directory
+            .join(format!("{BACKUP_PREFIX}{}-{stamp}.db", from.get()));
+
+        let connection = self.connection()?;
+        connection
+            .backup(rusqlite::MAIN_DB, &path, None)
+            .map_err(storage("the backup could not be written"))?;
+
+        Ok(path)
+    }
+
+    /// Runs every step the stored records still need.
+    ///
+    /// The current state and every version in the log move together, so
+    /// rolling back to an earlier version keeps working across an upgrade.
+    /// A failure leaves the store exactly as it was.
+    fn bring_forward(&self, steps: &[Migration]) -> Result<()> {
+        let Some(stored) = self.stored_schema_version()? else {
+            return Ok(());
+        };
+        let target = self.target;
+
+        if stored > target {
+            return Err(Error::new(
+                ErrorKind::SchemaMismatch,
+                format!(
+                    "the stored config was written against schema {} and this build reaches {}",
+                    stored.get(),
+                    target.get()
+                ),
+            ));
+        }
+        if stored == target {
+            return Ok(());
+        }
+
+        // Take the backup before anything is touched, so a failed migration
+        // still leaves a copy of what was there.
+        self.back_up(stored)?;
+
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(storage("a transaction could not be started"))?;
+
+        migrate_row(
+            &transaction,
+            "SELECT document FROM config_state WHERE id = ?1",
+            "UPDATE config_state SET document = ?2, schema_version = ?3 WHERE id = ?1",
+            STATE_ROW,
+            steps,
+        )?;
+
+        let ids = version_ids(&transaction)?;
+        for id in ids {
+            migrate_row(
+                &transaction,
+                "SELECT document FROM config_version WHERE id = ?1",
+                "UPDATE config_version SET document = ?2, schema_version = ?3 WHERE id = ?1",
+                id,
+                steps,
+            )?;
+        }
+
+        transaction
+            .commit()
+            .map_err(storage("the migration could not be committed"))?;
+
+        Ok(())
+    }
+
+    /// Returns the schema this store reads up to.
+    #[must_use]
+    pub const fn target_schema_version(&self) -> SchemaVersion {
+        self.target
     }
 
     /// Returns the directory this store lives in.
@@ -368,14 +511,14 @@ impl History for SqliteStore {
             )
         })?;
 
-        if stored != SchemaVersion::CURRENT {
+        if stored != self.target {
             return Err(Error::new(
                 ErrorKind::SchemaMismatch,
                 format!(
-                    "version {} was written against schema {} and this build reads {}",
+                    "version {} was written against schema {} and this store reads {}",
                     id.get(),
                     stored.get(),
-                    SchemaVersion::CURRENT.get()
+                    self.target.get()
                 ),
             ));
         }
@@ -541,6 +684,63 @@ fn prune(transaction: &Transaction<'_>, change: &Change, now: i64) -> Result<()>
     }
 
     Ok(())
+}
+
+/// Reads one stored document, runs the steps over it and writes it back.
+fn migrate_row(
+    transaction: &Transaction<'_>,
+    select: &str,
+    update: &str,
+    row: i64,
+    steps: &[Migration],
+) -> Result<()> {
+    let document: Option<String> = transaction
+        .query_row(select, [row], |value| value.get(0))
+        .optional()
+        .map_err(storage("a stored document could not be read"))?;
+
+    let Some(document) = document else {
+        return Ok(());
+    };
+
+    let mut value: serde_json::Value = serde_json::from_str(&document).map_err(|error| {
+        Error::new(
+            ErrorKind::Serialisation,
+            format!("a stored document could not be read for migration: {error}"),
+        )
+    })?;
+
+    let reached = migrate_document(&mut value, steps)?;
+    let migrated = serde_json::to_string(&value).map_err(|error| {
+        Error::new(
+            ErrorKind::Serialisation,
+            format!("a migrated document could not be written out: {error}"),
+        )
+    })?;
+
+    transaction
+        .execute(
+            update,
+            rusqlite::params![row, migrated, i64::from(reached.get())],
+        )
+        .map_err(storage("a migrated document could not be stored"))?;
+
+    Ok(())
+}
+
+fn version_ids(transaction: &Transaction<'_>) -> Result<Vec<i64>> {
+    let mut statement = transaction
+        .prepare("SELECT id FROM config_version ORDER BY id")
+        .map_err(storage("the version list could not be prepared"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(storage("the version list could not be read"))?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(storage("a version id could not be read"))?);
+    }
+    Ok(ids)
 }
 
 fn storage(what: &'static str) -> impl Fn(rusqlite::Error) -> Error {
