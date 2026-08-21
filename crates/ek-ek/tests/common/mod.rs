@@ -600,6 +600,12 @@ impl Agent {
         None
     }
 
+    /// Whether the traffic path has opened its link to this agent.
+    #[must_use]
+    pub fn is_linked(&self) -> bool {
+        self.linked.load(Ordering::SeqCst)
+    }
+
     /// Waits until the traffic path's own link is connected, so a push is not
     /// sent to nobody.
     pub async fn wait_linked(&self) {
@@ -628,26 +634,57 @@ impl Drop for Agent {
 }
 
 /// The running binary, stopped when the test ends however it ends.
-pub struct DataPlane(Child);
+pub struct DataPlane {
+    child: Child,
+    /// Where the binary's own diagnostics go.
+    ///
+    /// A file, never the pipe the test harness captures. That pipe has a
+    /// fixed buffer, and once several binaries have filled it they block on
+    /// their next write, before they have connected to the agent at all. The
+    /// tests then report that nothing started listening, which is true and
+    /// says nothing about why.
+    complaints: PathBuf,
+}
 
 impl DataPlane {
     /// Starts the binary against an agent socket.
     #[must_use]
     pub fn start(socket: &Path) -> Self {
+        let complaints = socket.with_extension("stderr");
+        let errors = std::fs::File::create(&complaints).expect("a log file must be creatable");
         let child = Command::new(env!("CARGO_BIN_EXE_ek-ek"))
             .arg("data-plane")
             .arg("--agent-socket")
             .arg(socket)
+            .stderr(errors)
             .spawn()
             .expect("the binary under test must start");
-        Self(child)
+        Self { child, complaints }
+    }
+
+    /// What the binary has written to its error output so far.
+    #[must_use]
+    pub fn complaints(&self) -> String {
+        std::fs::read_to_string(&self.complaints).unwrap_or_default()
+    }
+
+    /// How the binary exited, when it already has.
+    ///
+    /// A binary that refused its configuration or failed to bind is gone
+    /// within a moment. Without this a test waits out the whole startup
+    /// window and then reports that nothing started listening.
+    pub fn exited(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(format!("{status}")),
+            _ => None,
+        }
     }
 }
 
 impl Drop for DataPlane {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -678,15 +715,42 @@ impl Running {
         let agent = Agent::start(&socket, document.delivery(1)).await;
         let data_plane = DataPlane::start(&socket);
 
-        let running = Self {
+        let mut running = Self {
             agent,
             port: document.port,
             data_plane,
             directory,
             _slot: slot,
         };
-        drop(connect(running.port).await);
+        running.wait_until_listening().await;
         running
+    }
+
+    /// Waits for the frontend to accept a connection, or says why it never
+    /// will.
+    async fn wait_until_listening(&mut self) {
+        let start = tokio::time::Instant::now();
+        loop {
+            if let Ok(stream) = TcpStream::connect(("127.0.0.1", self.port)).await {
+                drop(stream);
+                return;
+            }
+            if let Some(status) = self.data_plane.exited() {
+                panic!(
+                    "the traffic path exited with {status} instead of listening on port {}; it said: {}",
+                    self.port,
+                    self.data_plane.complaints()
+                );
+            }
+            assert!(
+                start.elapsed() <= STARTUP_PATIENCE,
+                "the traffic path never started listening on port {} (linked to the agent: {}); it said: {}",
+                self.port,
+                self.agent.is_linked(),
+                self.data_plane.complaints()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Starts an L4 frontend and forgets what the readiness check cost.
