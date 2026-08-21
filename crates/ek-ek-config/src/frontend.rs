@@ -1,0 +1,161 @@
+// Copyright (C) 2026 Kerem Gok
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Frontends, the listening ends clients connect to.
+//!
+//! A frontend binds exactly one VIP, one port and one transport protocol
+//! (ADR-0016). That triple is what makes a frontend unique, which is why a
+//! TCP and a UDP frontend can share an address and a port: they are separate
+//! sockets. DNS needs precisely that.
+//!
+//! Combinations that make no sense, such as TLS settings on a frontend that
+//! does not terminate TLS, are representable here on purpose. The model
+//! records what an operator asked for and the validation layer judges it, so
+//! a mistake produces an error naming the field rather than a silently
+//! dropped setting.
+
+use serde::{Deserialize, Serialize};
+
+use crate::id::{BackendId, CertificateId, FrontendId, VipId};
+
+/// A listening endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frontend {
+    /// Identity used to reference this frontend.
+    pub id: FrontendId,
+    /// The single VIP this frontend listens on.
+    pub vip: VipId,
+    /// The single port this frontend listens on.
+    pub port: u16,
+    /// The single transport protocol this frontend listens with.
+    pub transport: TransportProtocol,
+    /// What the frontend does with the bytes it receives.
+    pub application: ApplicationProtocol,
+    /// TLS termination settings, set only where TLS is terminated.
+    pub tls: Option<TlsSettings>,
+    /// Whether the client address is forwarded with a PROXY protocol header.
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocol,
+    /// Ordered host and path rules, applied first match wins (ADR-0044).
+    ///
+    /// Order is part of the configuration, so it is preserved exactly as the
+    /// operator wrote it and never sorted.
+    #[serde(default)]
+    pub routing_rules: Vec<RoutingRule>,
+    /// Ordered SNI rules for TLS passthrough, applied first match wins
+    /// (ADR-0027).
+    #[serde(default)]
+    pub sni_rules: Vec<SniRule>,
+    /// Pool used when no rule matches.
+    ///
+    /// With no default set, a request that matches no rule is rejected and a
+    /// passthrough connection is closed.
+    pub default_backend: Option<BackendId>,
+    /// How long the frontend waits before it cuts what is left, in seconds.
+    ///
+    /// On TCP this is the time open connections get to finish. On UDP there
+    /// are no connections to finish, so it is the time the session table gets
+    /// to empty before its remaining entries are dropped.
+    pub drain_timeout_seconds: u32,
+}
+
+/// Transport layer a frontend listens with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportProtocol {
+    /// Connection-oriented transport.
+    Tcp,
+    /// Datagram transport, carried by the hand-written path rather than by
+    /// pingora (ADR-0017).
+    Udp,
+}
+
+/// What a frontend does with the traffic it accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationProtocol {
+    /// Parses HTTP and routes on host and path.
+    Http,
+    /// Reads the SNI from the ClientHello and forwards the handshake
+    /// untouched. No certificate is held for this frontend.
+    TlsPassthrough,
+    /// Forwards bytes without interpreting them.
+    Raw,
+}
+
+/// TLS termination settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsSettings {
+    /// Certificates offered, selected per handshake by SNI.
+    pub certificates: Vec<CertificateId>,
+    /// Protocol versions and cipher suites, chosen as a level rather than as
+    /// a list (ADR-0028).
+    #[serde(default)]
+    pub policy: TlsPolicyLevel,
+}
+
+/// A named TLS policy.
+///
+/// Operators pick a level. They never enter a cipher suite list, because a
+/// hand-written list is how a configuration silently becomes insecure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TlsPolicyLevel {
+    /// TLS 1.3 only.
+    #[serde(rename = "modern")]
+    Modern,
+    /// TLS 1.2 and 1.3 with safe cipher suites. This is the default.
+    #[default]
+    #[serde(rename = "dengeli")]
+    Balanced,
+    /// TLS 1.0 and above, for backends that cannot be upgraded.
+    #[serde(rename = "eski-uyumlu")]
+    LegacyCompatible,
+}
+
+/// Whether a PROXY protocol header is sent to the backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocol {
+    /// No header is sent. This is the default, because a backend that does
+    /// not expect the header rejects the connection (ADR-0043).
+    #[default]
+    Disabled,
+    /// Human-readable header.
+    V1,
+    /// Binary header.
+    V2,
+}
+
+/// One host and path rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingRule {
+    /// Host the request must match, with `*` allowed as the leading label.
+    ///
+    /// Leaving both this and `path_prefix` unset makes the rule match
+    /// everything, which validation rejects unless it is the last rule.
+    pub host_pattern: Option<String>,
+    /// Path the request must start with, matched after normalisation so that
+    /// `/owa/../admin` cannot slip past an `/owa` rule.
+    pub path_prefix: Option<String>,
+    /// Pool requests matching this rule are sent to.
+    pub backend: BackendId,
+    /// Time a matching request may take, in seconds.
+    ///
+    /// Unset falls back to the frontend's own limit. ActiveSync push and
+    /// IMAP IDLE need values of an hour or more here.
+    pub request_timeout_seconds: Option<u32>,
+}
+
+/// One SNI rule for a passthrough frontend.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SniRule {
+    /// Server name the ClientHello must match, with `*` allowed as the
+    /// leading label.
+    pub sni_pattern: String,
+    /// Pool matching connections are sent to.
+    pub backend: BackendId,
+}

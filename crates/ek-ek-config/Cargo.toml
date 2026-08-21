@@ -10,6 +10,12 @@ description = "Configuration domain model, serialisation and validation"
 
 # This crate must never depend on another workspace crate (ADR-0014).
 [dependencies]
+serde = { workspace = true }
+
+# The concrete wire format belongs to the store, not to the model. JSON is
+# used here only to prove that a config survives a serialisation round trip.
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
