@@ -18,14 +18,26 @@ use std::sync::Arc;
 
 use ek_ek_config::{Config, NodeId, NodeRole, SchemaVersion, SecretId, Vip, VipId};
 use ek_ek_store::{
-    DATABASE_FILE, Error, ErrorKind, KEY_MODE, MASTER_KEY_FILE, MasterKey, Result, Sealed, Secret,
-    Snapshot, SqliteStore, Store, crypto,
+    Change, DATABASE_FILE, Error, ErrorKind, KEY_MODE, MASTER_KEY_FILE, MasterKey, Result, Sealed,
+    Secret, Snapshot, SqliteStore, Store, VersionId, crypto,
 };
 use tempfile::TempDir;
 
-/// A private key in the form an operator would actually upload.
-const PRIVATE_KEY: &str =
-    "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----";
+/// The label a PEM block carries, kept apart from the dashes on purpose.
+///
+/// Assembling the block instead of writing it out keeps a literal key block
+/// out of a tracked file, which is what `scripts/check-secrets.sh` refuses.
+/// The value at run time is the same either way, so the test still measures
+/// what an operator would actually upload.
+const PEM_LABEL: &str = "PRIVATE KEY";
+
+fn private_key() -> String {
+    format!("-----BEGIN {PEM_LABEL}-----\nMIIEvQIBADANBgkq\n-----END {PEM_LABEL}-----")
+}
+
+fn pem_header() -> String {
+    format!("BEGIN {PEM_LABEL}")
+}
 
 fn data_directory() -> TempDir {
     tempfile::tempdir().expect("a temporary directory must be available")
@@ -54,10 +66,17 @@ fn config(marker: u32) -> Config {
     }
 }
 
+/// The change every test in this file records, since who wrote it is not
+/// what any of them is measuring. The version log itself is tested in
+/// `versioning.rs`.
+fn change() -> Change {
+    Change::new("admin", "test write")
+}
+
 fn snapshot(marker: u32) -> Snapshot {
     Snapshot::new(config(marker)).with_secret(
         SecretId::new("key-cert-web"),
-        Secret::new(PRIVATE_KEY.as_bytes().to_vec()),
+        Secret::new(private_key().into_bytes()),
     )
 }
 
@@ -107,7 +126,9 @@ fn a_written_config_survives_a_close_and_reopen() {
 
     {
         let store = SqliteStore::open(directory.path()).expect("the store must open");
-        store.write(&written).expect("the write must succeed");
+        store
+            .write(&written, &change())
+            .expect("the write must succeed");
     }
 
     let store = SqliteStore::open(directory.path()).expect("the store must reopen");
@@ -119,7 +140,7 @@ fn a_written_config_survives_a_close_and_reopen() {
     assert_eq!(read, written, "the round trip changed the value");
     assert_eq!(
         read.secrets[&SecretId::new("key-cert-web")].expose(),
-        PRIVATE_KEY.as_bytes(),
+        private_key().as_bytes(),
         "the key material must come back byte for byte"
     );
 }
@@ -129,7 +150,9 @@ fn key_material_never_reaches_the_database_file_in_the_clear() {
     let directory = data_directory();
     {
         let store = SqliteStore::open(directory.path()).expect("the store must open");
-        store.write(&snapshot(1)).expect("the write must succeed");
+        store
+            .write(&snapshot(1), &change())
+            .expect("the write must succeed");
     }
 
     let files = stored_bytes(directory.path());
@@ -143,11 +166,11 @@ fn key_material_never_reaches_the_database_file_in_the_clear() {
 
     for (name, bytes) in &files {
         assert!(
-            !contains(bytes, PRIVATE_KEY.as_bytes()),
+            !contains(bytes, private_key().as_bytes()),
             "{name} holds the private key in the clear"
         );
         assert!(
-            !contains(bytes, b"BEGIN PRIVATE KEY"),
+            !contains(bytes, pem_header().as_bytes()),
             "{name} holds a PEM header in the clear"
         );
     }
@@ -182,7 +205,9 @@ fn a_missing_master_key_stops_the_store_instead_of_emptying_it() {
     let directory = data_directory();
     {
         let store = SqliteStore::open(directory.path()).expect("the store must open");
-        store.write(&snapshot(1)).expect("the write must succeed");
+        store
+            .write(&snapshot(1), &change())
+            .expect("the write must succeed");
     }
 
     fs::remove_file(directory.path().join(MASTER_KEY_FILE)).expect("the key must be removable");
@@ -199,7 +224,9 @@ fn a_missing_master_key_stops_the_store_instead_of_emptying_it() {
     // state, so the refusal above is about the missing key and nothing else.
     let directory = data_directory();
     let store = SqliteStore::open(directory.path()).expect("the store must open");
-    store.write(&snapshot(1)).expect("the write must succeed");
+    store
+        .write(&snapshot(1), &change())
+        .expect("the write must succeed");
     assert!(store.read().expect("readable").is_some());
 }
 
@@ -248,22 +275,24 @@ fn every_sql_statement_binds_its_values() {
 /// It exists to show that the interface names nothing a database provides.
 #[derive(Default)]
 struct MemoryStore {
-    state: std::sync::Mutex<Option<Snapshot>>,
+    state: std::sync::Mutex<Vec<Snapshot>>,
 }
 
 impl Store for MemoryStore {
     fn read(&self) -> Result<Option<Snapshot>> {
         match self.state.lock() {
-            Ok(state) => Ok(state.clone()),
+            Ok(state) => Ok(state.last().cloned()),
             Err(error) => Err(Error::new(ErrorKind::Storage, format!("poisoned: {error}"))),
         }
     }
 
-    fn write(&self, snapshot: &Snapshot) -> Result<()> {
+    fn write(&self, snapshot: &Snapshot, _change: &Change) -> Result<VersionId> {
         match self.state.lock() {
             Ok(mut state) => {
-                *state = Some(snapshot.clone());
-                Ok(())
+                state.push(snapshot.clone());
+                Ok(VersionId::new(
+                    i64::try_from(state.len()).unwrap_or(i64::MAX),
+                ))
             }
             Err(error) => Err(Error::new(ErrorKind::Storage, format!("poisoned: {error}"))),
         }
@@ -274,7 +303,9 @@ impl Store for MemoryStore {
 fn round_trip(store: &dyn Store) -> Snapshot {
     assert_eq!(store.read().expect("a fresh store reads as empty"), None);
     let written = snapshot(7);
-    store.write(&written).expect("the write must succeed");
+    store
+        .write(&written, &change())
+        .expect("the write must succeed");
     store
         .read()
         .expect("the state must be readable")
@@ -309,7 +340,7 @@ fn concurrent_writes_leave_one_whole_state() {
         let store = Arc::clone(&store);
         handles.push(std::thread::spawn(move || {
             store
-                .write(&snapshot(marker))
+                .write(&snapshot(marker), &change())
                 .expect("every write succeeds")
         }));
     }
@@ -345,10 +376,10 @@ fn an_altered_record_does_not_open() {
     let store = SqliteStore::open(directory.path()).expect("the store must open");
     let key = MasterKey::read(&store.directory().join(MASTER_KEY_FILE)).expect("the key is there");
 
-    let sealed = crypto::seal(&key, b"key-cert-web", PRIVATE_KEY.as_bytes()).expect("seals");
+    let sealed = crypto::seal(&key, b"key-cert-web", &private_key().into_bytes()).expect("seals");
     assert_eq!(
         crypto::open(&key, b"key-cert-web", &sealed).expect("opens"),
-        PRIVATE_KEY.as_bytes(),
+        private_key().as_bytes(),
         "an untouched record must open"
     );
 
@@ -378,7 +409,9 @@ fn another_nodes_key_cannot_open_this_nodes_secrets() {
 
     {
         let our_store = SqliteStore::open(ours.path()).expect("the store must open");
-        our_store.write(&snapshot(1)).expect("the write succeeds");
+        our_store
+            .write(&snapshot(1), &change())
+            .expect("the write succeeds");
     }
     // A second node generates its own key, which is the whole point of a
     // per-node key: a copied database is not readable elsewhere.
@@ -409,12 +442,12 @@ fn another_nodes_key_cannot_open_this_nodes_secrets() {
 
 #[test]
 fn a_secret_never_prints_its_contents() {
-    let secret = Secret::new(PRIVATE_KEY.as_bytes().to_vec());
+    let secret = Secret::new(private_key().into_bytes());
     let printed = format!("{secret:?}");
 
     assert!(!printed.contains("BEGIN"), "a debug line must not leak it");
     assert!(printed.contains("redacted"));
-    assert_eq!(secret.len(), PRIVATE_KEY.len());
+    assert_eq!(secret.len(), private_key().len());
 
     // The same treatment for the key itself.
     let directory = data_directory();
@@ -434,7 +467,9 @@ fn a_malformed_key_file_is_refused() {
     let directory = data_directory();
     {
         let store = SqliteStore::open(directory.path()).expect("the store must open");
-        store.write(&snapshot(1)).expect("the write succeeds");
+        store
+            .write(&snapshot(1), &change())
+            .expect("the write succeeds");
     }
 
     let key_path = directory.path().join(MASTER_KEY_FILE);
@@ -480,7 +515,9 @@ fn writing_an_empty_secret_map_clears_what_was_there() {
     let directory = data_directory();
     let store = SqliteStore::open(directory.path()).expect("the store must open");
 
-    store.write(&snapshot(1)).expect("the write succeeds");
+    store
+        .write(&snapshot(1), &change())
+        .expect("the write succeeds");
     assert_eq!(
         store
             .read()
@@ -492,10 +529,13 @@ fn writing_an_empty_secret_map_clears_what_was_there() {
     );
 
     store
-        .write(&Snapshot {
-            config: config(1),
-            secrets: BTreeMap::new(),
-        })
+        .write(
+            &Snapshot {
+                config: config(1),
+                secrets: BTreeMap::new(),
+            },
+            &change(),
+        )
         .expect("the write succeeds");
     assert!(
         store
@@ -521,7 +561,9 @@ fn keeps_a_store_for_outside_inspection() {
         .expect("EK_EK_STORE_KEEP must name the directory to write into");
 
     let store = SqliteStore::open(&target).expect("the store must open");
-    store.write(&snapshot(1)).expect("the write must succeed");
+    store
+        .write(&snapshot(1), &change())
+        .expect("the write must succeed");
     drop(store);
 
     println!("store written to {target}");

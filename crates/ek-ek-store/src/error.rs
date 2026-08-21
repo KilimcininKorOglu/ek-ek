@@ -29,6 +29,11 @@ pub enum ErrorKind {
     Decryption,
     /// A stored record could not be read back into a value.
     Serialisation,
+    /// A version that was asked for is not in the log.
+    UnknownVersion,
+    /// A version was written against a different schema than this build
+    /// reads.
+    SchemaMismatch,
     /// The system clock is set before the Unix epoch.
     Clock,
 }

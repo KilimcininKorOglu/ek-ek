@@ -17,6 +17,7 @@ use ek_ek_config::{Config, SecretId};
 
 use crate::error::Result;
 use crate::secret::Secret;
+use crate::version::{Change, VersionId};
 
 /// A complete store state: the config, plus the key material it references.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,11 +55,15 @@ pub trait Store {
     /// Fails when the state cannot be read or does not open.
     fn read(&self) -> Result<Option<Snapshot>>;
 
-    /// Replaces the stored state.
+    /// Replaces the stored state and appends one version to the log.
+    ///
+    /// One call is one version, however many objects it touched. A template
+    /// that creates a dozen objects is therefore one entry in the history and
+    /// one step to undo.
     ///
     /// # Errors
     ///
     /// Fails when the state cannot be written. A failed write leaves the
     /// previous state intact.
-    fn write(&self, snapshot: &Snapshot) -> Result<()>;
+    fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId>;
 }

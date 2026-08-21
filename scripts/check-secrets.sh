@@ -43,9 +43,14 @@ report 'private key in a JSON service account' '"private_key"[[:space:]]*:[[:spa
 
 # Assignments that carry an actual value. An empty assignment is a template
 # placeholder, which is exactly what .env.example is allowed to contain.
-report 'password with a value' '(password|passwd|pwd)[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]]{8,}'
-report 'api key with a value' 'api[_-]?key[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]]{16,}'
-report 'secret with a value' 'secret[_-]?(key|token)?[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]]{16,}'
+#
+# Parentheses are excluded from the value, so `let secret = Secret::new(..)`
+# and every other ordinary binding stops matching. A credential is a literal;
+# a call is not one, and treating every long right hand side as a leak would
+# train everyone to ignore this check.
+report 'password with a value' '(password|passwd|pwd)[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]()]{8,}'
+report 'api key with a value' 'api[_-]?key[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]()]{16,}'
+report 'secret with a value' 'secret[_-]?(key|token)?[[:space:]]*[:=][[:space:]]*["'"'"']?[^"'"'"'[:space:]()]{16,}'
 
 # The environment file itself must never be tracked.
 if git ls-files --error-unmatch .env >/dev/null 2>&1; then

@@ -257,6 +257,7 @@ dependencies = [
  "ek-ek-config",
  "getrandom",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
 ]

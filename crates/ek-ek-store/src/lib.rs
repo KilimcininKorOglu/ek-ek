@@ -22,6 +22,14 @@
 //! does not change when that happens. State is read and written whole, which
 //! is the shape a Raft state machine applies as well.
 //!
+//! # History
+//!
+//! Every write appends one version, whatever it touched, so undoing a
+//! template that created a dozen objects is one step. A rollback is itself a
+//! write, so the history is never shortened by undoing something. The last
+//! [`MAX_VERSIONS`] versions are kept and older ones are removed with a note
+//! of what went.
+//!
 //! # Secrets
 //!
 //! The config model holds only a `SecretId`. The bytes behind that identity
@@ -30,15 +38,21 @@
 //! its owner alone, and never replicated.
 
 pub mod crypto;
+pub mod diff;
 pub mod error;
 pub mod master_key;
 pub mod secret;
 pub mod sqlite;
 pub mod store;
+pub mod version;
 
 pub use crypto::Sealed;
+pub use diff::{ConfigDiff, DiffEntry, ObjectChange, ObjectKind, diff};
 pub use error::{Error, ErrorKind, Result};
 pub use master_key::{KEY_LENGTH, KEY_MODE, MASTER_KEY_FILE, MasterKey};
 pub use secret::Secret;
 pub use sqlite::{DATABASE_FILE, DEFAULT_DATA_DIRECTORY, SqliteStore};
 pub use store::{Snapshot, Store};
+pub use version::{
+    Change, ChangeKind, History, MAX_VERSIONS, PruningRecord, VersionId, VersionRecord,
+};

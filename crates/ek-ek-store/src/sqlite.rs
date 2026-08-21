@@ -13,14 +13,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ek_ek_config::{Config, SecretId};
-use rusqlite::{Connection, OptionalExtension};
+use ek_ek_config::{Config, SchemaVersion, SecretId};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::crypto::{Sealed, open, seal};
 use crate::error::{Error, ErrorKind, Result};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
 use crate::secret::Secret;
 use crate::store::{Snapshot, Store};
+use crate::version::{
+    Change, ChangeKind, History, MAX_VERSIONS, PruningRecord, VersionId, VersionRecord,
+};
+
+/// The action a pruning row carries in the audit log.
+///
+/// M8 owns the audit log. The table is already there and reserved for it, so
+/// a retention note goes in as a row rather than into a second table nobody
+/// would think to look in.
+const PRUNED_ACTION: &str = "version.pruned";
 
 /// Where a node keeps its data in a real installation (ADR-0010).
 pub const DEFAULT_DATA_DIRECTORY: &str = "/var/lib/ek-ek";
@@ -213,7 +223,18 @@ impl Store for SqliteStore {
         Ok(Some(Snapshot { config, secrets }))
     }
 
-    fn write(&self, snapshot: &Snapshot) -> Result<()> {
+    fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId> {
+        self.write_version(snapshot, change, None)
+    }
+}
+
+impl SqliteStore {
+    fn write_version(
+        &self,
+        snapshot: &Snapshot,
+        change: &Change,
+        restored: Option<VersionId>,
+    ) -> Result<VersionId> {
         let document = serde_json::to_string(&snapshot.config).map_err(|error| {
             Error::new(
                 ErrorKind::Serialisation,
@@ -267,12 +288,259 @@ impl Store for SqliteStore {
             )
             .map_err(storage("the config could not be written"))?;
 
+        let version = append_version(&transaction, &document, snapshot, change, restored, now)?;
+        prune(&transaction, change, now)?;
+
         transaction
             .commit()
             .map_err(storage("the transaction could not be committed"))?;
 
-        Ok(())
+        Ok(version)
     }
+}
+
+impl History for SqliteStore {
+    fn versions(&self) -> Result<Vec<VersionRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, recorded_at, author, description, schema_version, restored_from \
+                 FROM config_version ORDER BY id DESC",
+            )
+            .map_err(storage("the version query could not be prepared"))?;
+
+        let rows = statement
+            .query_map([], |row| {
+                let schema: i64 = row.get(4)?;
+                let schema = u32::try_from(schema)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, schema))?;
+                Ok(VersionRecord {
+                    id: VersionId::new(row.get(0)?),
+                    recorded_at_unix: row.get(1)?,
+                    author: row.get(2)?,
+                    description: row.get(3)?,
+                    schema_version: SchemaVersion::new(schema),
+                    kind: match row.get::<_, Option<i64>>(5)? {
+                        None => ChangeKind::Write,
+                        Some(restored) => ChangeKind::Rollback {
+                            restored: VersionId::new(restored),
+                        },
+                    },
+                })
+            })
+            .map_err(storage("the version log could not be read"))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(storage("a version record could not be read"))?);
+        }
+        Ok(records)
+    }
+
+    fn version_config(&self, id: VersionId) -> Result<Option<Config>> {
+        let connection = self.connection()?;
+        let document: Option<String> = connection
+            .query_row(
+                "SELECT document FROM config_version WHERE id = ?1",
+                [id.get()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage("a version could not be read"))?;
+
+        let Some(document) = document else {
+            return Ok(None);
+        };
+
+        serde_json::from_str(&document).map(Some).map_err(|error| {
+            Error::new(
+                ErrorKind::Serialisation,
+                format!("version {} could not be read back: {error}", id.get()),
+            )
+        })
+    }
+
+    fn roll_back_to(&self, id: VersionId, change: &Change) -> Result<VersionId> {
+        let stored = self.version_schema(id)?.ok_or_else(|| {
+            Error::new(
+                ErrorKind::UnknownVersion,
+                format!("version {} is not in the log", id.get()),
+            )
+        })?;
+
+        if stored != SchemaVersion::CURRENT {
+            return Err(Error::new(
+                ErrorKind::SchemaMismatch,
+                format!(
+                    "version {} was written against schema {} and this build reads {}",
+                    id.get(),
+                    stored.get(),
+                    SchemaVersion::CURRENT.get()
+                ),
+            ));
+        }
+
+        let restored = self.version_config(id)?.ok_or_else(|| {
+            Error::new(
+                ErrorKind::UnknownVersion,
+                format!("version {} is not in the log", id.get()),
+            )
+        })?;
+
+        let current = self.read()?.ok_or_else(|| {
+            Error::new(
+                ErrorKind::UnknownVersion,
+                "there is no current state to roll back from".to_owned(),
+            )
+        })?;
+
+        // Certificates and key material keep their current values. Reverting
+        // a certificate that ACME renewed in the meantime would break TLS on
+        // a node that was serving a moment earlier (ADR-0018).
+        let mut config = restored;
+        config.certificates = current.config.certificates.clone();
+
+        let snapshot = Snapshot {
+            config,
+            secrets: current.secrets,
+        };
+        self.write_version(&snapshot, change, Some(id))
+    }
+
+    fn prunings(&self) -> Result<Vec<PruningRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT recorded_at, actor, subject FROM audit_log \
+                 WHERE action = ?1 ORDER BY id DESC",
+            )
+            .map_err(storage("the pruning query could not be prepared"))?;
+
+        let rows = statement
+            .query_map([PRUNED_ACTION], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(storage("the pruning records could not be read"))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (recorded_at_unix, author, subject) =
+                row.map_err(storage("a pruning record could not be read"))?;
+            let removed = subject
+                .as_deref()
+                .and_then(|value| value.parse::<i64>().ok())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Serialisation,
+                        "a pruning record names no version".to_owned(),
+                    )
+                })?;
+            records.push(PruningRecord {
+                recorded_at_unix,
+                author,
+                removed: VersionId::new(removed),
+            });
+        }
+        Ok(records)
+    }
+}
+
+impl SqliteStore {
+    fn version_schema(&self, id: VersionId) -> Result<Option<SchemaVersion>> {
+        let connection = self.connection()?;
+        let stored: Option<i64> = connection
+            .query_row(
+                "SELECT schema_version FROM config_version WHERE id = ?1",
+                [id.get()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage("a version could not be read"))?;
+        stored
+            .map(|value| {
+                u32::try_from(value).map(SchemaVersion::new).map_err(|_| {
+                    Error::new(
+                        ErrorKind::Serialisation,
+                        format!("a stored schema version of {value} cannot be read"),
+                    )
+                })
+            })
+            .transpose()
+    }
+}
+
+fn append_version(
+    transaction: &Transaction<'_>,
+    document: &str,
+    snapshot: &Snapshot,
+    change: &Change,
+    restored: Option<VersionId>,
+    now: i64,
+) -> Result<VersionId> {
+    transaction
+        .execute(
+            "INSERT INTO config_version \
+             (recorded_at, author, description, schema_version, restored_from, document) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                now,
+                change.author,
+                change.description,
+                i64::from(snapshot.config.schema_version.get()),
+                restored.map(VersionId::get),
+                document
+            ],
+        )
+        .map_err(storage("the version could not be recorded"))?;
+
+    Ok(VersionId::new(transaction.last_insert_rowid()))
+}
+
+/// Keeps the log at its limit and notes what went.
+///
+/// A silent removal would make an operator's history shorter than they
+/// remember with nothing to explain it, so every removal leaves a row.
+fn prune(transaction: &Transaction<'_>, change: &Change, now: i64) -> Result<()> {
+    let mut statement = transaction
+        .prepare("SELECT id FROM config_version ORDER BY id DESC LIMIT -1 OFFSET ?1")
+        .map_err(storage("the retention query could not be prepared"))?;
+
+    let rows = statement
+        .query_map([i64::try_from(MAX_VERSIONS).unwrap_or(i64::MAX)], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(storage("the versions past the limit could not be listed"))?;
+
+    let mut doomed = Vec::new();
+    for row in rows {
+        doomed.push(row.map_err(storage("a version past the limit could not be read"))?);
+    }
+    drop(statement);
+
+    for id in doomed {
+        transaction
+            .execute("DELETE FROM config_version WHERE id = ?1", [id])
+            .map_err(storage("an old version could not be removed"))?;
+        transaction
+            .execute(
+                "INSERT INTO audit_log (recorded_at, actor, action, subject, detail) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    now,
+                    change.author,
+                    PRUNED_ACTION,
+                    id.to_string(),
+                    format!("retention limit {MAX_VERSIONS}")
+                ],
+            )
+            .map_err(storage("the removal could not be recorded"))?;
+    }
+
+    Ok(())
 }
 
 fn storage(what: &'static str) -> impl Fn(rusqlite::Error) -> Error {
@@ -306,6 +574,16 @@ CREATE TABLE IF NOT EXISTS config_state (
     schema_version INTEGER NOT NULL,
     document       TEXT    NOT NULL,
     updated_at     INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS config_version (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at      INTEGER NOT NULL,
+    author           TEXT    NOT NULL,
+    description      TEXT    NOT NULL,
+    schema_version   INTEGER NOT NULL,
+    restored_from    INTEGER,
+    document         TEXT    NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS secret (
