@@ -40,5 +40,5 @@ pub use link::{AgentLink, RECONNECT_DELAY, STATUS_INTERVAL};
 pub use live::{Live, LiveConfig, Status};
 pub use probe::{Outcome, PROBE_AGENT};
 pub use proxy::Proxy;
-pub use server::{Binding, ListenerKind, bindings, build};
+pub use server::{Binding, DrainCount, ListenerKind, bindings, build, shutdown_conf};
 pub use stream::StreamProxy;

@@ -11,6 +11,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+// Each test binary uses a different part of the harness.
+#[allow(dead_code)]
 mod common;
 
 use std::sync::Arc;

@@ -23,6 +23,26 @@ use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
+/// Where this test binary's own port range starts.
+static NEXT_PORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A port nothing is listening on.
+///
+/// Walks a range derived from the process id rather than asking the kernel
+/// for any free port: the kernel's answer has to be released before the code
+/// under test can bind it, and a parallel test takes it in that gap.
+#[must_use]
+pub fn free_port() -> u16 {
+    let base = 24_000 + u64::from(std::process::id() % 300) * 20;
+    loop {
+        let at = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let port = u16::try_from(base + at % 20).unwrap_or(24_000);
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
 fn address(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(127, 0, 0, last))
 }

@@ -121,12 +121,7 @@ pub fn build(link: AgentLink) -> Result<Server> {
     let live = link.live();
     let status = link.status();
 
-    let mut server = Server::new(None).map_err(|error| {
-        Error::new(
-            ErrorKind::Listener,
-            format!("the server could not be created: {error}"),
-        )
-    })?;
+    let mut server = Server::new_with_opt_and_conf(None, shutdown_conf(&live.load().config));
     server.bootstrap();
 
     // One balancer for the whole process. The open connection counts belong
@@ -136,6 +131,7 @@ pub fn build(link: AgentLink) -> Result<Server> {
     status.watch(Arc::clone(&balancer));
 
     let bindings = bindings(&live.load().config)?;
+    let tcp_listeners = bindings.len();
     for binding in bindings {
         let name = format!("frontend {}", binding.frontend);
         match binding.kind {
@@ -182,7 +178,10 @@ pub fn build(link: AgentLink) -> Result<Server> {
 
     // UDP is not pingora's, so each UDP frontend runs its own loop as a
     // background service beside the listeners pingora owns (ADR-0017).
-    for binding in udp_bindings(&live.load().config) {
+    let udp = udp_bindings(&live.load().config);
+    // Counted so the last frontend to finish draining knows it is the last.
+    let draining = Arc::new(DrainCount::new(udp.len(), tcp_listeners == 0));
+    for binding in udp {
         let name = format!("udp frontend {}", binding.frontend);
         server.add_service(background_service(
             &name,
@@ -194,6 +193,7 @@ pub fn build(link: AgentLink) -> Result<Server> {
                     Arc::clone(&status),
                     Arc::clone(&balancer),
                 ),
+                draining: Arc::clone(&draining),
             },
         ));
     }
@@ -213,29 +213,110 @@ pub fn build(link: AgentLink) -> Result<Server> {
     Ok(server)
 }
 
+/// The shortest a process may take to leave once it has been asked to.
+///
+/// pingora sleeps for the grace period after it has told every service to
+/// stop, so this is a floor under how long a replacement waits for the
+/// process it is replacing.
+const LEAST_GRACE: u64 = 1;
+
+/// How long the runtimes get to unwind once the grace period has passed.
+const RUNTIME_SHUTDOWN: u64 = 5;
+
+/// Builds the server configuration that decides how long shutdown takes.
+///
+/// pingora's own defaults are five minutes of grace period, which would keep
+/// a replaced process alive long after it has stopped serving and pile
+/// processes up (R-05). The grace period here is the longest drain any
+/// frontend asks for, because that is how long the UDP path may still be
+/// carrying sessions after the signal (ADR-0067).
+pub fn shutdown_conf(config: &Config) -> pingora::server::configuration::ServerConf {
+    let drain = config
+        .frontends
+        .iter()
+        .map(|frontend| u64::from(frontend.drain_timeout_seconds))
+        .max()
+        .unwrap_or(0)
+        .max(LEAST_GRACE);
+
+    pingora::server::configuration::ServerConf {
+        grace_period_seconds: Some(drain),
+        graceful_shutdown_timeout_seconds: Some(RUNTIME_SHUTDOWN),
+        ..Default::default()
+    }
+}
+
+/// Counts UDP frontends that are still draining.
+///
+/// pingora sleeps out its whole grace period rather than waiting for its
+/// services, so a process whose sessions are gone would otherwise sit idle
+/// for the rest of it. When the last UDP frontend has drained and there is
+/// no TCP listener to wait for, the process leaves (ADR-0067).
+pub struct DrainCount {
+    left: std::sync::atomic::AtomicUsize,
+    /// Whether leaving early is safe, which it is only when nothing else in
+    /// this process is carrying traffic.
+    alone: bool,
+}
+
+impl DrainCount {
+    /// Starts a count over `frontends` UDP frontends.
+    ///
+    /// `alone` says whether this process carries nothing but UDP, which is
+    /// the only case where leaving early is safe.
+    #[must_use]
+    pub fn new(frontends: usize, alone: bool) -> Self {
+        Self {
+            left: std::sync::atomic::AtomicUsize::new(frontends),
+            alone,
+        }
+    }
+
+    /// Records one frontend as drained. Returns whether the process may now
+    /// leave, which needs both the last frontend and nothing else to wait for.
+    pub fn finished(&self) -> bool {
+        let before = self.left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.alone && before <= 1
+    }
+}
+
 /// Runs one UDP frontend for as long as the server runs.
 struct UdpService {
     proxy: UdpProxy,
+    draining: Arc<DrainCount>,
 }
 
 #[async_trait]
 impl pingora::services::background::BackgroundService for UdpService {
     async fn start(&self, mut shutdown: ShutdownWatch) {
         let (stop_sender, stop) = tokio::sync::watch::channel(false);
-        let serving = self.proxy.run(stop);
+        let mut serving = std::pin::pin!(self.proxy.run(stop));
 
-        tokio::select! {
-            outcome = serving => {
-                // A UDP frontend that cannot bind is a frontend that serves
-                // nothing. Saying so beats a process that looks healthy and
-                // silently drops a service.
-                if let Err(error) = outcome {
-                    eprintln!("udp frontend could not run: {error}");
-                }
-            }
+        let mut drained = false;
+        let outcome = tokio::select! {
+            outcome = &mut serving => outcome,
             _ = shutdown.changed() => {
                 let _ = stop_sender.send(true);
+                drained = true;
+                // Awaited rather than dropped: the frontend is draining now,
+                // and dropping the future here would cut the sessions it is
+                // still carrying (ADR-0067).
+                serving.await
             }
+        };
+
+        // A UDP frontend that cannot bind is a frontend that serves nothing.
+        // Saying so beats a process that looks healthy and silently drops a
+        // service.
+        if let Err(error) = outcome {
+            eprintln!("udp frontend could not run: {error}");
+        }
+
+        if drained && self.draining.finished() {
+            // Everything this process was carrying is gone, and pingora would
+            // sleep out the rest of its grace period regardless. Leaving now
+            // is what lets a replacement stop waiting.
+            std::process::exit(0);
         }
     }
 }

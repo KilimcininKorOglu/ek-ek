@@ -178,6 +178,12 @@ impl<S> Sessions<S> {
         self.expired
     }
 
+    /// Whether a client already has a session here.
+    #[must_use]
+    pub fn holds(&self, client: SocketAddr) -> bool {
+        self.entries.contains_key(&client)
+    }
+
     /// Returns the session a client already has, refreshing its place in the
     /// use order.
     pub fn refresh(&mut self, client: SocketAddr, now: Instant) -> Option<&mut Session<S>> {

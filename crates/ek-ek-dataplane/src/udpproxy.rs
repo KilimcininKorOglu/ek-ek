@@ -33,6 +33,33 @@ const MOST: usize = 9_216;
 /// How often the table is swept for sessions that have gone idle.
 const SWEEP: Duration = Duration::from_millis(500);
 
+/// How long a socket opened during drain is kept for its answer.
+///
+/// Long enough for a backend on the same network to answer, short enough
+/// that a drain does not accumulate descriptors.
+const PASSING_LIFE: Duration = Duration::from_secs(5);
+
+/// Binds a UDP socket that another process may already be bound to.
+///
+/// `SO_REUSEPORT` is set before the bind, which the standard library gives
+/// no way to do. How the kernel shares datagrams between the sockets in the
+/// group is its own business and differs between systems; nothing here
+/// depends on the split, because both processes hash the same client to the
+/// same member (ADR-0025).
+fn bind_shared(address: SocketAddr) -> std::io::Result<UdpSocket> {
+    let domain = if address.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    socket.set_reuse_port(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    UdpSocket::from_std(std::net::UdpSocket::from(socket))
+}
+
 /// The return half of a session.
 ///
 /// Holding the task handle here is what ties the reader's lifetime to the
@@ -89,19 +116,33 @@ impl UdpProxy {
     ///
     /// Fails when the listening socket cannot be bound.
     pub async fn run(&self, mut stop: tokio::sync::watch::Receiver<bool>) -> std::io::Result<()> {
-        let listener = Arc::new(UdpSocket::bind(self.address).await?);
+        // SO_REUSEPORT, so a replacement process can bind this port while
+        // this one is still serving (ADR-0017). Without it the replacement
+        // fails to bind and the service is down for the whole restart.
+        let listener = Arc::new(bind_shared(self.address)?);
         let settings = self.settings();
         let mut sessions: Sessions<Upstream> = Sessions::new(settings.0, settings.1);
         let stats = self.status.udp_frontend(&self.frontend, sessions.limit());
 
         let mut buffer = vec![0_u8; MOST];
         let mut sweep = tokio::time::interval(SWEEP);
+        // Set once the shutdown signal arrives. From then the frontend still
+        // carries traffic but opens no new session, so the table can only
+        // shrink (ADR-0067).
+        let mut draining: Option<tokio::time::Instant> = None;
 
         loop {
             tokio::select! {
                 received = listener.recv_from(&mut buffer) => {
                     let Ok((read, client)) = received else { continue };
-                    self.forward(&mut sessions, &listener, client, &buffer[..read]).await;
+                    self.forward(
+                        &mut sessions,
+                        &listener,
+                        client,
+                        &buffer[..read],
+                        draining.is_some(),
+                    )
+                    .await;
                     stats.set(sessions.len() as u64, sessions.evicted());
                 }
                 _ = sweep.tick() => {
@@ -118,14 +159,41 @@ impl UdpProxy {
                     drop(sessions.expire(Instant::now()));
                     self.drop_missing_members(&mut sessions);
                     stats.set(sessions.len() as u64, sessions.evicted());
+
+                    if let Some(started) = draining {
+                        // Two ways out, and an operator needs to tell them
+                        // apart: the table emptied, or the time ran out with
+                        // sessions still in it.
+                        if sessions.is_empty() {
+                            return Ok(());
+                        }
+                        if started.elapsed() >= self.drain_limit() {
+                            drop(sessions.clear());
+                            stats.set(0, sessions.evicted());
+                            return Ok(());
+                        }
+                    }
                 }
-                _ = stop.changed() => {
-                    drop(sessions.clear());
-                    stats.set(0, sessions.evicted());
-                    return Ok(());
+                _ = stop.changed(), if draining.is_none() => {
+                    // The socket stays open: closing it is the only way out
+                    // of the SO_REUSEPORT group, and the answers to sessions
+                    // still in the table have to leave from the address the
+                    // client wrote to.
+                    draining = Some(tokio::time::Instant::now());
+                    if sessions.is_empty() {
+                        return Ok(());
+                    }
                 }
             }
         }
+    }
+
+    /// How long this frontend gets to empty its table before it is cut.
+    fn drain_limit(&self) -> Duration {
+        let live = self.live.load();
+        let seconds =
+            frontend(&live, &self.frontend).map_or(0, |frontend| frontend.drain_timeout_seconds);
+        Duration::from_secs(u64::from(seconds))
     }
 
     /// Reads this frontend's session settings from the live configuration.
@@ -137,12 +205,18 @@ impl UdpProxy {
     }
 
     /// Sends one datagram on, opening a session for a client that has none.
+    ///
+    /// While draining, a client with no session is still served, but nothing
+    /// is put in the table: dropping the datagram would be a measurable loss,
+    /// and keeping the session would stop the table from ever emptying
+    /// (ADR-0067).
     async fn forward(
         &self,
         sessions: &mut Sessions<Upstream>,
         listener: &Arc<UdpSocket>,
         client: SocketAddr,
         datagram: &[u8],
+        draining: bool,
     ) {
         let now = Instant::now();
         if let Some(session) = sessions.refresh(client, now) {
@@ -181,6 +255,17 @@ impl UdpProxy {
             return;
         };
         let _ = upstream.socket.send(datagram).await;
+
+        if draining {
+            // The socket and its reader stay alive long enough for the answer
+            // to come back, then close with the task that holds them.
+            let passing = upstream;
+            tokio::spawn(async move {
+                tokio::time::sleep(PASSING_LIFE).await;
+                drop(passing);
+            });
+            return;
+        }
 
         // The evicted session is dropped here, which aborts its reader and
         // closes its socket. Leaving it to the map would leak a descriptor.

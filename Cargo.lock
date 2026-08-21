@@ -780,6 +780,7 @@ dependencies = [
  "http",
  "pingora",
  "sha2",
+ "socket2",
  "tempfile",
  "tokio",
 ]

@@ -322,6 +322,8 @@ pub struct Document {
     pub transport: String,
     /// The most UDP sessions the frontend keeps, or zero for the default.
     pub udp_session_limit: u32,
+    /// Seconds the frontend gets to drain.
+    pub drain_timeout_seconds: u32,
     /// Seconds a connection may sit with no byte moving.
     pub idle_timeout_seconds: u32,
     /// The pool's health check, already rendered, or `null`.
@@ -354,6 +356,7 @@ impl Document {
             application: "http".to_owned(),
             transport: "tcp".to_owned(),
             udp_session_limit: 0,
+            drain_timeout_seconds: 5,
             idle_timeout_seconds: 0,
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
@@ -439,6 +442,13 @@ impl Document {
         self
     }
 
+    /// Sets how long the frontend gets to drain before it is cut.
+    #[must_use]
+    pub fn drain_timeout(mut self, seconds: u32) -> Self {
+        self.drain_timeout_seconds = seconds;
+        self
+    }
+
     /// Sets the most UDP sessions the frontend keeps.
     #[must_use]
     pub fn udp_session_limit(mut self, limit: u32) -> Self {
@@ -485,7 +495,7 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5,"udp_session_limit":{udp_limit}}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}],
 "certificates":[{certificates}],
 "dns_providers":[],
@@ -494,6 +504,7 @@ impl Document {
             application = self.application,
             transport = self.transport,
             udp_limit = self.udp_session_limit,
+            drain = self.drain_timeout_seconds,
             idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
             default_backend = self.default_backend,
@@ -982,7 +993,11 @@ impl DataPlane {
     /// Starts the binary against an agent socket.
     #[must_use]
     pub fn start(socket: &Path) -> Self {
-        let complaints = socket.with_extension("stderr");
+        // Numbered, because an upgrade runs two processes against one agent
+        // socket and they must not write over each other's diagnostics.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let at = NEXT.fetch_add(1, Ordering::SeqCst);
+        let complaints = socket.with_extension(format!("stderr.{at}"));
         let errors = std::fs::File::create(&complaints).expect("a log file must be creatable");
         let child = Command::new(env!("CARGO_BIN_EXE_ek-ek"))
             .arg("data-plane")
@@ -998,6 +1013,40 @@ impl DataPlane {
     #[must_use]
     pub fn complaints(&self) -> String {
         std::fs::read_to_string(&self.complaints).unwrap_or_default()
+    }
+
+    /// The process id, which is what a signal and `ps` both need.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Asks the process to shut down gracefully.
+    ///
+    /// `SIGQUIT` is pingora's upgrade signal: it hands over listening sockets
+    /// and drains rather than cutting what is in flight.
+    pub fn ask_to_drain(&self) {
+        let _ = Command::new("kill")
+            .arg("-QUIT")
+            .arg(self.pid().to_string())
+            .status();
+    }
+
+    /// Waits for the process to end on its own, returning how long it took.
+    ///
+    /// Returns `None` when it is still running at the end of the wait, so a
+    /// test can say "it never stopped" rather than hang.
+    pub async fn wait_for_exit(&mut self, patience: Duration) -> Option<Duration> {
+        let start = tokio::time::Instant::now();
+        loop {
+            if self.exited().is_some() {
+                return Some(start.elapsed());
+            }
+            if start.elapsed() > patience {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// How the binary exited, when it already has.
@@ -1019,6 +1068,44 @@ impl Drop for DataPlane {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Whether the operating system still knows this process id.
+///
+/// Read from `ps` rather than from the `Child`, so a process that ended
+/// without being reaped is still visible: that is what a zombie is.
+#[must_use]
+pub fn process_state(pid: u32) -> String {
+    let output = Command::new("ps")
+        .arg("-o")
+        .arg("stat=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output();
+    output
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// How many processes hold a UDP port open.
+///
+/// Read from `lsof`, so the answer comes from the operating system rather
+/// than from what the test believes it started.
+#[must_use]
+pub fn udp_listeners(port: u16) -> usize {
+    let output = Command::new("lsof")
+        .arg("-nP")
+        .arg(format!("-iUDP:{port}"))
+        .output();
+    let Ok(output) = output else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// A running traffic path with its agent and its temporary directory.
@@ -1083,6 +1170,39 @@ impl Running {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// The agent socket this run is using, so a replacement process can
+    /// speak to the same agent.
+    #[must_use]
+    pub fn socket_path(&self) -> PathBuf {
+        self.directory.path().join("agent.sock")
+    }
+
+    /// The process id of the running traffic path.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.data_plane.pid()
+    }
+
+    /// Asks the running traffic path to drain.
+    pub fn ask_to_drain(&self) {
+        self.data_plane.ask_to_drain();
+    }
+
+    /// Waits for the running traffic path to end on its own.
+    pub async fn wait_for_exit(&mut self, patience: Duration) -> Option<Duration> {
+        self.data_plane.wait_for_exit(patience).await
+    }
+
+    /// Starts a second traffic path against the same agent.
+    ///
+    /// This is the replacement half of an upgrade: it binds the same UDP
+    /// port while the first one is still serving, which only works because
+    /// the listener is opened with `SO_REUSEPORT` (ADR-0017).
+    #[must_use]
+    pub fn start_replacement(&self) -> DataPlane {
+        DataPlane::start(&self.socket_path())
     }
 
     /// Starts a UDP frontend and waits until it answers.
