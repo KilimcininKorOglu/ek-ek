@@ -141,15 +141,15 @@ dev-test: ## (pending) Run integration tests inside the docker environment
 
 # --- Reserved for later milestones ------------------------------------------
 
+# plan/ is not tracked by git (ADR-0047), so these run locally only and are
+# deliberately absent from `make ci`: a CI checkout has no plan files.
 .PHONY: plan-index
-plan-index: ## (pending) Regenerate the task index in plan/README.md
-	@echo "plan-index is not implemented yet"
-	@exit 1
+plan-index: ## Regenerate the task index in plan/README.md
+	python3 $(SCRIPTS)/plan_index.py
 
 .PHONY: plan-check
-plan-check: ## (pending) Verify plan file consistency
-	@echo "plan-check is not implemented yet"
-	@exit 1
+plan-check: ## Verify plan file consistency
+	python3 $(SCRIPTS)/plan_index.py --check
 
 .PHONY: package
 package: ## (pending) Build the deb and rpm packages
