@@ -8,6 +8,21 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["Kerem Gok"]
 
+[workspace.lints.rust]
+# `unsafe` is denied rather than forbidden, because ek-ek-vrrp may need a raw
+# socket call that no safe wrapper covers. Opening it must be a deliberate,
+# reviewed `#[allow]` on the smallest possible scope, never a project default.
+unsafe_code = "deny"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# A panic in a load balancer drops live traffic. Outside tests, propagate the
+# error with `Result` and `?` instead.
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "warn"
+
 [workspace.dependencies]
 clap = { version = "4.6", features = ["derive"] }
 

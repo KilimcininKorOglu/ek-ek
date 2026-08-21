@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned to an exact version, never a floating channel, so that every machine
+# and CI run compiles with the same rustc. T-009 verifies this against the
+# minimum version pingora requires and raises it if needed.
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

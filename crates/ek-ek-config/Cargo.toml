@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
 description = "Configuration domain model, serialisation and validation"
 
 # This crate must never depend on another workspace crate (ADR-0014).
 [dependencies]
+
+[lints]
+workspace = true

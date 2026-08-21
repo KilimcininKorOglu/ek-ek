@@ -1,0 +1,66 @@
+# Dependency policy. Run with `cargo deny check`.
+#
+# The project is AGPL-3.0-or-later and is also sold under a commercial license
+# (ADR-0011). A dependency whose license cannot be combined into an AGPL work,
+# or which forces terms we cannot grant a commercial licensee, breaks that model
+# permanently. This file is the enforcement point.
+
+[graph]
+# The product only ships on Linux (ADR-0007), so the dependency graph is
+# evaluated for the platforms it actually runs on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+# A known vulnerability or a yanked crate fails the check. Every exception is
+# listed here with a reason, so silent exceptions cannot accumulate.
+ignore = []
+
+[licenses]
+# Only licenses whose code can be combined into an AGPL-3.0 work.
+# GPL-2.0-only is deliberately absent: it is incompatible with AGPL-3.0.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+# The allow list is kept ahead of what the graph currently uses, so adding a
+# dependency does not require editing policy in the same change.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates are AGPL-3.0-or-later and are marked `publish = false`, so they
+# are skipped here. AGPL is deliberately absent from the allow list above: an
+# external AGPL dependency would make the commercial license unsellable
+# (ADR-0011), so it must be rejected even though our own code carries it.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+# A `*` version requirement makes the build non-reproducible.
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# Anything outside crates.io is a supply chain question, so it must be a
+# deliberate, listed decision rather than a silent one.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
