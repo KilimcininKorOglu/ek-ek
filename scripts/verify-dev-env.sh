@@ -153,8 +153,11 @@ if "${COMPOSE[@]}" exec -T "$NODE1" bash -c \
     check "the file appears on the host under docker-data/node1" \
         test -f "docker-data/node1/$stamp"
 
-    owner="$(stat -f '%u' "docker-data/node1/$stamp" 2>/dev/null \
-        || stat -c '%u' "docker-data/node1/$stamp" 2>/dev/null)"
+    # GNU stat is tried first. Its -f means "filesystem info" rather than
+    # "format", so it succeeds with useless output instead of failing, and a
+    # BSD-first order silently returns the wrong thing on Linux.
+    owner="$(stat -c '%u' "docker-data/node1/$stamp" 2>/dev/null \
+        || stat -f '%u' "docker-data/node1/$stamp" 2>/dev/null)"
     if [ "$owner" = "$(id -u)" ]; then
         ok "the file belongs to the host user, not root"
     else
