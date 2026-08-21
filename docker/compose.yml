@@ -18,6 +18,10 @@ x-node: &node
     context: ..
     dockerfile: docker/Dockerfile.dev
   image: ek-ek-dev:latest
+  # Without an init, PID 1 is the idle command, which never reaps an orphan.
+  # Orphaned children then pile up as zombies and look like a supervision bug
+  # in whatever is being measured. In production systemd is PID 1 and does this.
+  init: true
   cap_add:
     # Add a VIP to an interface and delete it again.
     - NET_ADMIN
@@ -58,6 +62,26 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.13
+
+  # Only used by the T-009 spike. It idles until a script runs a build or a
+  # measurement inside it, and it carries a cargo cache so a rebuild does not
+  # start from zero every time.
+  spike:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spike
+    image: ek-ek-spike:latest
+    container_name: ek-ek-spike
+    hostname: spike
+    restart: "no"
+    init: true
+    volumes:
+      - ../spikes:/spike/src-tree
+      - ../docker-data/spike-cargo:/usr/local/cargo/registry
+      - ../docker-data/spike-target:/spike/target
+    networks:
+      lab:
+        ipv4_address: 172.28.0.31
 
   backend1:
     image: nginx:1.27-alpine

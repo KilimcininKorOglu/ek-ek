@@ -1,0 +1,21 @@
+# Build image for the T-009 spike.
+#
+# pingora needs a Linux target and a C toolchain for its TLS backend, so the
+# spike is built and run inside the container rather than on the development
+# machine (ADR-0007, ADR-0012).
+FROM rust:1.93-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        curl \
+        libclang-dev \
+        libssl-dev \
+        perl \
+        pkg-config \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /spike
+CMD ["sleep", "infinity"]
