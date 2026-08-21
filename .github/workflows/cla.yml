@@ -45,7 +45,7 @@ jobs:
           path-to-signatures: signatures/cla.json
           # The project owner holds the copyright and cannot sign an agreement
           # with themselves.
-          allowlist: KilimcininKorOglu
+          allowlist: cla-test-placeholder-do-not-keep
           custom-notsigned-prcomment: >
             Thank you for the pull request. Before it can be merged, please read
             the [Contributor License Agreement](https://github.com/KilimcininKorOglu/ek-ek/blob/main/CLA.md)
