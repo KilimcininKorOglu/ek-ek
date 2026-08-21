@@ -38,6 +38,7 @@ pub mod frontend;
 pub mod health;
 pub mod id;
 pub mod node;
+pub mod validation;
 pub mod vip;
 
 pub use backend::{
@@ -58,4 +59,8 @@ pub use id::{
     BackendId, CertificateId, DnsProviderId, FrontendId, MemberId, NodeId, SecretId, VipId,
 };
 pub use node::{Node, NodeRole};
+pub use validation::{
+    ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors, validate,
+    validate_vip_removal,
+};
 pub use vip::Vip;
