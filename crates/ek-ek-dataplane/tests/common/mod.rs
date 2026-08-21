@@ -57,6 +57,7 @@ pub fn config(members: u16) -> Config {
             http2: Http2::Enabled,
             connect_timeout_seconds: 5,
             request_timeout_seconds: 60,
+            idle_timeout_seconds: 0,
             drain_timeout_seconds: 5,
         }],
         backends: vec![Backend {

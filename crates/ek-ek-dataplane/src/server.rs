@@ -18,11 +18,13 @@ use ek_ek_ipc::DataPlaneState;
 use pingora::apps::HttpServerOptions;
 use pingora::server::{Server, ShutdownWatch};
 use pingora::services::background::background_service;
+use pingora::services::listening::Service;
 
 use crate::balance::Balancer;
 use crate::error::{Error, ErrorKind, Result};
 use crate::link::AgentLink;
 use crate::proxy::Proxy;
+use crate::stream::StreamProxy;
 
 /// Where a frontend listens.
 ///
@@ -35,7 +37,20 @@ pub struct Binding {
     /// The address in `host:port` form.
     pub address: String,
     /// Whether this listener accepts cleartext HTTP/2 (ADR-0059).
+    ///
+    /// Only meaningful on an HTTP listener.
     pub http2: bool,
+    /// What the listener does with the bytes it accepts.
+    pub kind: ListenerKind,
+}
+
+/// Which path serves a listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerKind {
+    /// Parsed as HTTP and routed on host and path.
+    Http,
+    /// Forwarded byte for byte, without being interpreted.
+    Stream,
 }
 
 /// Works out what a configuration says to listen on.
@@ -54,12 +69,13 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
         if frontend.transport != TransportProtocol::Tcp {
             continue;
         }
-        // Only HTTP frontends have somewhere to go yet. A raw or passthrough
-        // frontend is silently skipped nowhere: it simply has no listener
-        // until the path that serves it exists.
-        if frontend.application != ApplicationProtocol::Http {
-            continue;
-        }
+        // TLS passthrough needs the ClientHello read before a member is
+        // chosen, which arrives with M4. It has no listener until then.
+        let kind = match frontend.application {
+            ApplicationProtocol::Http => ListenerKind::Http,
+            ApplicationProtocol::Raw => ListenerKind::Stream,
+            ApplicationProtocol::TlsPassthrough => continue,
+        };
 
         let vip = config
             .vips
@@ -80,6 +96,7 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
             frontend: frontend.id.as_str().to_owned(),
             address: format!("{}:{}", vip.address, frontend.port),
             http2: frontend.http2.is_enabled(),
+            kind,
         });
     }
 
@@ -111,34 +128,51 @@ pub fn build(link: AgentLink) -> Result<Server> {
     // to what this process is doing, not to a configuration, so they survive
     // every swap.
     let balancer = Arc::new(Balancer::new());
+    status.watch(Arc::clone(&balancer));
 
     let bindings = bindings(&live.load().config)?;
     for binding in bindings {
-        let proxy = Proxy::new(
-            binding.frontend.clone(),
-            Arc::clone(&live),
-            Arc::clone(&status),
-            Arc::clone(&balancer),
-        );
-        let mut service = pingora::proxy::http_proxy_service_with_name(
-            &server.configuration,
-            proxy,
-            &format!("frontend {}", binding.frontend),
-        );
+        let name = format!("frontend {}", binding.frontend);
+        match binding.kind {
+            ListenerKind::Http => {
+                let proxy = Proxy::new(
+                    binding.frontend.clone(),
+                    Arc::clone(&live),
+                    Arc::clone(&status),
+                    Arc::clone(&balancer),
+                );
+                let mut service = pingora::proxy::http_proxy_service_with_name(
+                    &server.configuration,
+                    proxy,
+                    &name,
+                );
 
-        // Cleartext HTTP/2 is told apart from HTTP/1.1 by the connection
-        // preface, so turning it on leaves HTTP/1.1 clients untouched
-        // (ADR-0059).
-        // The struct is non-exhaustive, so it is built by default and then
-        // adjusted rather than written out field by field.
-        let mut options = HttpServerOptions::default();
-        options.h2c = binding.http2;
-        if let Some(logic) = service.app_logic_mut() {
-            logic.server_options = Some(options);
+                // Cleartext HTTP/2 is told apart from HTTP/1.1 by the
+                // connection preface, so turning it on leaves HTTP/1.1
+                // clients untouched (ADR-0059).
+                // The struct is non-exhaustive, so it is built by default and
+                // then adjusted rather than written out field by field.
+                let mut options = HttpServerOptions::default();
+                options.h2c = binding.http2;
+                if let Some(logic) = service.app_logic_mut() {
+                    logic.server_options = Some(options);
+                }
+
+                service.add_tcp(&binding.address);
+                server.add_service(service);
+            }
+            ListenerKind::Stream => {
+                let proxy = StreamProxy::new(
+                    binding.frontend.clone(),
+                    Arc::clone(&live),
+                    Arc::clone(&status),
+                    Arc::clone(&balancer),
+                );
+                let mut service = Service::new(name, proxy);
+                service.add_tcp(&binding.address);
+                server.add_service(service);
+            }
         }
-
-        service.add_tcp(&binding.address);
-        server.add_service(service);
     }
 
     status.set_state(DataPlaneState::Serving);

@@ -132,6 +132,7 @@ pub fn http_frontend() -> Frontend {
         http2: Http2::Enabled,
         connect_timeout_seconds: 5,
         request_timeout_seconds: 60,
+        idle_timeout_seconds: 0,
         drain_timeout_seconds: 30,
     }
 }
@@ -154,6 +155,7 @@ pub fn passthrough_frontend() -> Frontend {
         http2: Http2::Enabled,
         connect_timeout_seconds: 5,
         request_timeout_seconds: 60,
+        idle_timeout_seconds: 0,
         drain_timeout_seconds: 60,
     }
 }
@@ -173,6 +175,7 @@ pub fn dns_tcp_frontend() -> Frontend {
         http2: Http2::Enabled,
         connect_timeout_seconds: 5,
         request_timeout_seconds: 60,
+        idle_timeout_seconds: 0,
         drain_timeout_seconds: 10,
     }
 }
@@ -192,6 +195,7 @@ pub fn dns_udp_frontend() -> Frontend {
         http2: Http2::Enabled,
         connect_timeout_seconds: 5,
         request_timeout_seconds: 60,
+        idle_timeout_seconds: 0,
         drain_timeout_seconds: 10,
     }
 }

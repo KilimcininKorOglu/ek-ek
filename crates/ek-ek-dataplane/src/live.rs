@@ -15,11 +15,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use ek_ek_config::{Config, ValidationErrors, validate};
 use ek_ek_ipc::{ConfigUpdate, Counters, DataPlaneState, StatusReport};
 
-use crate::balance::ring_for;
+use crate::balance::{Balancer, ring_for};
 use crate::hashring::HashRing;
 
 /// A configuration together with the delivery it came from.
@@ -111,6 +111,12 @@ pub struct Status {
     requests_handled: AtomicU64,
     configs_applied: AtomicU64,
     configs_rejected: AtomicU64,
+    backend_connect_failures: AtomicU64,
+    /// Where the open connection counts are read from (ADR-0061).
+    ///
+    /// Attached after the balancer exists rather than owned, because the
+    /// counts belong to the traffic path and the status only reports them.
+    balancer: ArcSwapOption<Balancer>,
 }
 
 impl Status {
@@ -155,6 +161,12 @@ impl Status {
         self.configs_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Counts one backend connection that could not be opened.
+    pub fn backend_connect_failed(&self) {
+        self.backend_connect_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Reads the counters.
     #[must_use]
     pub fn counters(&self) -> Counters {
@@ -162,7 +174,13 @@ impl Status {
             requests_handled: self.requests_handled.load(Ordering::Relaxed),
             configs_applied: self.configs_applied.load(Ordering::Relaxed),
             configs_rejected: self.configs_rejected.load(Ordering::Relaxed),
+            backend_connect_failures: self.backend_connect_failures.load(Ordering::Relaxed),
         }
+    }
+
+    /// Points the status at the balancer whose counts it reports.
+    pub fn watch(&self, balancer: Arc<Balancer>) {
+        self.balancer.store(Some(balancer));
     }
 
     /// Builds the report sent to the agent.
@@ -172,6 +190,12 @@ impl Status {
             generation,
             state: self.state(),
             counters: self.counters(),
+            open_connections: self
+                .balancer
+                .load()
+                .as_ref()
+                .map(|balancer| balancer.report())
+                .unwrap_or_default(),
         }
     }
 }

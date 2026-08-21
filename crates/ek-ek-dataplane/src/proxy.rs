@@ -277,7 +277,8 @@ impl ProxyHttp for Proxy {
             return Ok(true);
         };
 
-        self.balancer.opened(name, member.id.as_str());
+        self.balancer
+            .opened(&self.frontend, name, member.id.as_str());
         ctx.chosen = Some((name.to_owned(), member.id.as_str().to_owned()));
 
         let address = SocketAddr::new(member.address, member.port);
@@ -351,7 +352,7 @@ impl ProxyHttp for Proxy {
         // otherwise least connections would send every later request away
         // from a member that once failed.
         if let Some((pool, member)) = ctx.chosen.take() {
-            self.balancer.closed(&pool, &member);
+            self.balancer.closed(&self.frontend, &pool, &member);
         }
     }
 

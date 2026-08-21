@@ -70,6 +70,14 @@ pub struct Frontend {
     /// ActiveSync push and IMAP IDLE hold a request open for an hour or more,
     /// and some deployments want no ceiling at all.
     pub request_timeout_seconds: u32,
+    /// How long a connection may sit with no byte moving in either direction,
+    /// in seconds (ADR-0060).
+    ///
+    /// Zero means no limit. The counter resets on traffic in either
+    /// direction, because a connection that sent a slow query and is waiting
+    /// for its answer is working, not idle. Only the L4 path reads this: on
+    /// an HTTP frontend the request limit already covers it.
+    pub idle_timeout_seconds: u32,
     /// How long the frontend waits before it cuts what is left, in seconds.
     ///
     /// On TCP this is the time open connections get to finish. On UDP there

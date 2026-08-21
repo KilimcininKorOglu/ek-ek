@@ -25,6 +25,7 @@ pub mod link;
 pub mod live;
 pub mod proxy;
 pub mod server;
+pub mod stream;
 
 pub use balance::{Balancer, ring_for};
 pub use error::{Error, ErrorKind, Result};
@@ -32,4 +33,5 @@ pub use hashring::{HashRing, hash};
 pub use link::{AgentLink, RECONNECT_DELAY, STATUS_INTERVAL};
 pub use live::{Live, LiveConfig, Status};
 pub use proxy::Proxy;
-pub use server::{Binding, bindings, build};
+pub use server::{Binding, ListenerKind, bindings, build};
+pub use stream::StreamProxy;

@@ -11,8 +11,8 @@
 
 use ek_ek_config::{Config, SchemaVersion};
 use ek_ek_ipc::{
-    AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, StatusReport,
-    decode, encode,
+    AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, OpenConnections,
+    StatusReport, decode, encode,
 };
 
 fn empty_config() -> Config {
@@ -46,7 +46,14 @@ fn a_message_survives_a_round_trip() {
             requests_handled: 5,
             configs_applied: 2,
             configs_rejected: 1,
+            backend_connect_failures: 3,
         },
+        open_connections: vec![OpenConnections {
+            frontend: "web".to_owned(),
+            pool: "pool-web".to_owned(),
+            member: "web-1".to_owned(),
+            count: 7,
+        }],
     });
     let line = encode(&report).expect("it must encode");
     assert_eq!(
@@ -104,6 +111,7 @@ fn the_two_directions_do_not_read_as_each_other() {
         generation: 1,
         state: DataPlaneState::Starting,
         counters: Counters::default(),
+        open_connections: Vec::new(),
     }))
     .expect("it must encode");
 

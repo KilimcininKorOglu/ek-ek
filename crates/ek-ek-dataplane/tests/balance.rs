@@ -135,7 +135,7 @@ fn least_connections_picks_the_member_carrying_fewer_open_connections() {
     let ring = ring_for(&pool);
 
     for _ in 0..3 {
-        balancer.opened("web", "busy");
+        balancer.opened("front", "web", "busy");
     }
     assert_eq!(balancer.open_connections("web", "busy"), 3);
 
@@ -146,9 +146,9 @@ fn least_connections_picks_the_member_carrying_fewer_open_connections() {
 
     // Once the busy member finishes, it is eligible again.
     for _ in 0..3 {
-        balancer.closed("web", "busy");
+        balancer.closed("front", "web", "busy");
     }
-    balancer.opened("web", "idle");
+    balancer.opened("front", "web", "idle");
     let chosen = balancer
         .choose(&pool, &ring, client(1))
         .expect("a member must be chosen");

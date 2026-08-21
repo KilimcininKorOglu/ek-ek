@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common::{Agent, config, invalid_config, update};
 use ek_ek_config::{ApplicationProtocol, TransportProtocol, VipId};
-use ek_ek_dataplane::{AgentLink, ErrorKind, bindings};
+use ek_ek_dataplane::{AgentLink, ErrorKind, ListenerKind, bindings};
 use ek_ek_ipc::DataPlaneState;
 use tempfile::TempDir;
 
@@ -338,6 +338,7 @@ fn listeners_follow_the_frontends() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].frontend, "web");
     assert_eq!(found[0].address, "127.0.0.1:8080");
+    assert_eq!(found[0].kind, ListenerKind::Http);
 
     // A UDP frontend is not a pingora listener, because the UDP path is hand
     // written and does not go through it.
@@ -345,10 +346,23 @@ fn listeners_follow_the_frontends() {
     udp.frontends[0].transport = TransportProtocol::Udp;
     assert!(bindings(&udp).expect("the frontends resolve").is_empty());
 
-    // Nor is a frontend whose path is not written yet.
+    // A raw frontend is a listener too, served by the L4 path rather than by
+    // the HTTP one.
     let mut raw = config.clone();
     raw.frontends[0].application = ApplicationProtocol::Raw;
-    assert!(bindings(&raw).expect("the frontends resolve").is_empty());
+    let found = bindings(&raw).expect("the frontends resolve");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].kind, ListenerKind::Stream);
+
+    // TLS passthrough still has no listener: choosing a member needs the
+    // ClientHello read first, which arrives with M4.
+    let mut passthrough = config.clone();
+    passthrough.frontends[0].application = ApplicationProtocol::TlsPassthrough;
+    assert!(
+        bindings(&passthrough)
+            .expect("the frontends resolve")
+            .is_empty()
+    );
 
     // A frontend naming a VIP that is not there is an error rather than a
     // listener nobody notices is missing.

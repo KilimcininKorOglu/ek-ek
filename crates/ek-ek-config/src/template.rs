@@ -728,6 +728,7 @@ fn build_website(
             http2: Http2::Enabled,
             connect_timeout_seconds: 5,
             request_timeout_seconds: 60,
+            idle_timeout_seconds: 0,
             drain_timeout_seconds: 30,
         },
     );
@@ -766,6 +767,7 @@ fn build_website(
             http2: Http2::Enabled,
             connect_timeout_seconds: 5,
             request_timeout_seconds: 60,
+            idle_timeout_seconds: 0,
             drain_timeout_seconds: 10,
         },
     );
@@ -822,6 +824,7 @@ fn build_dns(config: &mut Config, created: &mut Vec<Created>, values: &Common<'_
                 connect_timeout_seconds: 5,
                 // Raw traffic carries no request to time out.
                 request_timeout_seconds: 0,
+                idle_timeout_seconds: 0,
                 drain_timeout_seconds: 10,
             },
         );
@@ -936,6 +939,7 @@ fn build_exchange(
             http2: Http2::Enabled,
             connect_timeout_seconds: 5,
             request_timeout_seconds: 60,
+            idle_timeout_seconds: 0,
             drain_timeout_seconds: 60,
         },
     );
@@ -1022,6 +1026,7 @@ fn raw_frontend(
         connect_timeout_seconds: 5,
         // Raw traffic carries no request to time out.
         request_timeout_seconds: 0,
+        idle_timeout_seconds: 0,
         drain_timeout_seconds: 30,
     }
 }

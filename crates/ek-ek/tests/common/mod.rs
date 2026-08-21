@@ -213,6 +213,10 @@ pub struct Document {
     pub request_timeout_seconds: u32,
     /// Whether cleartext HTTP/2 is accepted.
     pub http2: String,
+    /// What the frontend does with the bytes it accepts.
+    pub application: String,
+    /// Seconds a connection may sit with no byte moving.
+    pub idle_timeout_seconds: u32,
     /// Rules, already rendered.
     pub routing_rules: Vec<String>,
     /// Pool used when no rule matches, or nothing.
@@ -230,6 +234,8 @@ impl Document {
             connect_timeout_seconds: 2,
             request_timeout_seconds: 5,
             http2: "enabled".to_owned(),
+            application: "http".to_owned(),
+            idle_timeout_seconds: 0,
             routing_rules: Vec::new(),
             default_backend: r#""web""#.to_owned(),
         }
@@ -263,6 +269,20 @@ impl Document {
         self
     }
 
+    /// Makes the frontend an L4 listener that forwards bytes untouched.
+    #[must_use]
+    pub fn raw(mut self) -> Self {
+        self.application = "raw".to_owned();
+        self
+    }
+
+    /// Sets how long a connection may sit with no byte moving.
+    #[must_use]
+    pub fn idle_timeout(mut self, seconds: u32) -> Self {
+        self.idle_timeout_seconds = seconds;
+        self
+    }
+
     /// Renders the document.
     #[must_use]
     pub fn render(&self) -> String {
@@ -270,11 +290,13 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"http","tls":null,"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"drain_timeout_seconds":5}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"tcp","application":"{application}","tls":null,"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":5}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":null,"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}],
 "certificates":[],
 "dns_providers":[]}}"#,
             port = self.port,
+            application = self.application,
+            idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
             default_backend = self.default_backend,
             http2 = self.http2,
@@ -299,6 +321,11 @@ impl Document {
 /// A stand-in `node-agent`: it greets with one delivery and can push more.
 pub struct Agent {
     pushes: broadcast::Sender<String>,
+    /// The last status report the traffic path sent, as raw JSON.
+    ///
+    /// Kept as text rather than parsed into a workspace type, so a change to
+    /// the wire format fails a test rather than compiling.
+    reports: Arc<std::sync::Mutex<Option<String>>>,
     /// Set once the long lived link is connected. The short connection that
     /// collects the first configuration is not it, and pushing to that one
     /// would push to a socket about to close.
@@ -314,6 +341,8 @@ impl Agent {
         let sender = pushes.clone();
         let linked = Arc::new(AtomicBool::new(false));
         let connected = Arc::clone(&linked);
+        let reports: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let collected = Arc::clone(&reports);
 
         let accept = tokio::spawn(async move {
             loop {
@@ -323,6 +352,7 @@ impl Agent {
                 let greeting = greeting.clone();
                 let mut pushed = sender.subscribe();
                 let connected = Arc::clone(&connected);
+                let collected = Arc::clone(&collected);
 
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
@@ -345,8 +375,11 @@ impl Agent {
                     loop {
                         tokio::select! {
                             line = lines.next_line() => {
-                                if !matches!(line, Ok(Some(_))) {
-                                    return;
+                                let Ok(Some(line)) = line else { return };
+                                if line.contains(r#""message":"status""#)
+                                    && let Ok(mut store) = collected.lock()
+                                {
+                                    *store = Some(line);
                                 }
                             }
                             push = pushed.recv() => {
@@ -372,9 +405,63 @@ impl Agent {
 
         Self {
             pushes,
+            reports,
             linked,
             accept,
         }
+    }
+
+    /// Returns the last status report, waiting for one to arrive.
+    pub async fn last_report(&self) -> Option<Report> {
+        for _ in 0..600 {
+            if let Ok(store) = self.reports.lock()
+                && let Some(line) = store.as_ref()
+            {
+                return Some(Report::parse(line));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// Waits until a named counter reaches at least `least`.
+    pub async fn wait_for_counter(&self, name: &str, least: u64) -> Option<u64> {
+        for _ in 0..600 {
+            let line = self
+                .reports
+                .lock()
+                .ok()
+                .and_then(|store| store.as_ref().cloned());
+            if let Some(line) = line
+                && let Some(value) = field(&line, name).and_then(|value| value.parse::<u64>().ok())
+                && value >= least
+            {
+                return Some(value);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// Waits until the reported open connections add up to `total`.
+    ///
+    /// Returns them so a test can check the breakdown, not just the total.
+    pub async fn wait_for_open_connections(&self, total: u64) -> Option<Vec<Open>> {
+        for _ in 0..600 {
+            let line = self
+                .reports
+                .lock()
+                .ok()
+                .and_then(|store| store.as_ref().cloned());
+            if let Some(line) = line {
+                let open = Report::parse(&line).open_connections;
+                if open.iter().map(|entry| entry.count).sum::<u64>() == total {
+                    return Some(open);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
     }
 
     /// Waits until the traffic path's own link is connected, so a push is not
@@ -456,6 +543,19 @@ impl Running {
             directory,
         };
         drop(connect(running.port).await);
+        running
+    }
+
+    /// Starts an L4 frontend and forgets what the readiness check cost.
+    ///
+    /// Proving the listener is up means opening a connection to it, and on an
+    /// L4 frontend that connection reaches a backend like any other. Counting
+    /// it would put every share and every total one out.
+    pub async fn start_l4(document: &Document, members: &[&RawMember]) -> Self {
+        let running = Self::start(document).await;
+        for member in members {
+            member.settle().await;
+        }
         running
     }
 }
@@ -610,4 +710,281 @@ pub async fn ask_once(port: u16, request: &str) -> std::io::Result<Answer> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await?;
     let mut io = BufReader::new(stream);
     ask(&mut io, request).await
+}
+
+/// A stand-in backend that speaks no protocol at all.
+///
+/// Used by the L4 tests: it echoes what it receives, greets first when asked
+/// to, or accepts and stays silent. None of that is HTTP, which is the point.
+pub struct RawMember {
+    /// Identity used in the configuration.
+    pub name: String,
+    /// Port it listens on.
+    pub port: u16,
+    /// How many connections it has accepted.
+    accepted: Arc<AtomicU64>,
+    /// How many of those it has seen closed by the client.
+    closed: Arc<AtomicU64>,
+    /// Every byte it received, in order, per connection.
+    received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+/// How a raw backend behaves once a connection arrives.
+#[derive(Clone, Debug)]
+pub enum RawBehaviour {
+    /// Sends back everything it receives.
+    Echo,
+    /// Writes these bytes before the client has said anything, the way SMTP
+    /// and PostgreSQL both do.
+    GreetFirst(Vec<u8>),
+    /// Accepts and never writes.
+    Silent,
+    /// Accepts, waits, then closes without the client having asked.
+    CloseAfter(Duration),
+}
+
+impl RawMember {
+    /// Starts a raw backend behaving as asked.
+    pub async fn start(name: &str, behaviour: RawBehaviour) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a backend port must be free");
+        let port = listener
+            .local_addr()
+            .expect("the backend must have an address")
+            .port();
+
+        let accepted = Arc::new(AtomicU64::new(0));
+        let closed = Arc::new(AtomicU64::new(0));
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let counted = Arc::clone(&accepted);
+        let hung_up = Arc::clone(&closed);
+        let collected = Arc::clone(&received);
+
+        let accept = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                let behaviour = behaviour.clone();
+                let hung_up = Arc::clone(&hung_up);
+                let collected = Arc::clone(&collected);
+
+                tokio::spawn(async move {
+                    let mut seen: Vec<u8> = Vec::new();
+                    if let RawBehaviour::GreetFirst(greeting) = &behaviour
+                        && stream.write_all(greeting).await.is_err()
+                    {
+                        return;
+                    }
+                    if let RawBehaviour::CloseAfter(delay) = &behaviour {
+                        tokio::time::sleep(*delay).await;
+                        drop(stream);
+                        return;
+                    }
+
+                    let mut buffer = vec![0_u8; 16 * 1024];
+                    loop {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => {
+                                // The client went away. Recording it is how a
+                                // test proves the proxy passed the close on
+                                // rather than holding the socket.
+                                hung_up.fetch_add(1, Ordering::SeqCst);
+                                if let Ok(mut store) = collected.lock() {
+                                    store.push(seen);
+                                }
+                                return;
+                            }
+                            Ok(read) => {
+                                seen.extend_from_slice(&buffer[..read]);
+                                if matches!(behaviour, RawBehaviour::Echo)
+                                    && stream.write_all(&buffer[..read]).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        Self {
+            name: name.to_owned(),
+            port,
+            accepted,
+            closed,
+            received,
+            accept,
+        }
+    }
+
+    /// How many connections have arrived.
+    #[must_use]
+    pub fn accepted(&self) -> u64 {
+        self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Waits for the readiness connection to land, then forgets everything
+    /// counted so far.
+    ///
+    /// Without the wait the probe could still be in flight and land after the
+    /// reset, which would put the count one out in the other direction.
+    pub async fn settle(&self) {
+        let start = tokio::time::Instant::now();
+        while self.accepted.load(Ordering::SeqCst) == 0 {
+            if start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.accepted.store(0, Ordering::SeqCst);
+        self.closed.store(0, Ordering::SeqCst);
+        if let Ok(mut store) = self.received.lock() {
+            store.clear();
+        }
+    }
+
+    /// How many connections the client end has closed.
+    #[must_use]
+    pub fn closed(&self) -> u64 {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Everything received, per finished connection.
+    #[must_use]
+    pub fn received(&self) -> Vec<Vec<u8>> {
+        self.received
+            .lock()
+            .map(|store| store.clone())
+            .unwrap_or_default()
+    }
+
+    /// How this member is written into a configuration.
+    #[must_use]
+    pub fn entry(&self, weight: u16, admin_state: &str) -> String {
+        format!(
+            r#"{{"id":"{}","address":"127.0.0.1","port":{},"weight":{weight},"admin_state":"{admin_state}"}}"#,
+            self.name, self.port
+        )
+    }
+}
+
+impl Drop for RawMember {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+/// FNV-1a over a byte slice, for proving a payload crossed unchanged.
+///
+/// Written out rather than taken from the standard library, so a test failure
+/// means the bytes differ rather than that the hasher changed.
+#[must_use]
+pub fn checksum(bytes: &[u8]) -> u64 {
+    let mut value: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        value ^= u64::from(*byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    value
+}
+
+/// A payload of the given size, with no repeating block a buggy copy could
+/// hide inside.
+#[must_use]
+pub fn payload(size: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(size);
+    let mut value: u64 = 0x2545_F491_4F6C_DD1D;
+    while bytes.len() < size {
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.truncate(size);
+    bytes
+}
+
+/// One entry of a status report's open connection list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Open {
+    /// The frontend the connections arrived on.
+    pub frontend: String,
+    /// The pool they went to.
+    pub pool: String,
+    /// The member inside that pool.
+    pub member: String,
+    /// How many are open.
+    pub count: u64,
+}
+
+/// A status report, read out of the wire format by hand.
+///
+/// Parsed with string scanning rather than with the crate's own types, so a
+/// rename that keeps compiling still fails here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// What the process says it is doing.
+    pub state: String,
+    /// The generation being served.
+    pub generation: u64,
+    /// Open connections, per frontend, pool and member.
+    pub open_connections: Vec<Open>,
+}
+
+impl Report {
+    /// Reads a report out of one protocol line.
+    #[must_use]
+    pub fn parse(line: &str) -> Self {
+        Self {
+            state: field(line, "state").unwrap_or_default(),
+            generation: field(line, "generation")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            open_connections: open_connections(line),
+        }
+    }
+}
+
+/// Reads one scalar field out of a JSON line.
+fn field(line: &str, name: &str) -> Option<String> {
+    let at = line.find(&format!(r#""{name}":"#))? + name.len() + 3;
+    let rest = &line[at..];
+    if let Some(text) = rest.strip_prefix('"') {
+        text.find('"').map(|end| text[..end].to_owned())
+    } else {
+        let end = rest
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(rest.len());
+        Some(rest[..end].to_owned())
+    }
+}
+
+/// Reads the open connection list out of a JSON line.
+fn open_connections(line: &str) -> Vec<Open> {
+    let Some(at) = line.find(r#""open_connections":["#) else {
+        return Vec::new();
+    };
+    let rest = &line[at + r#""open_connections":["#.len()..];
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
+
+    rest[..end]
+        .split("},")
+        .filter(|part| part.contains("\"member\""))
+        .map(|part| Open {
+            frontend: field(part, "frontend").unwrap_or_default(),
+            pool: field(part, "pool").unwrap_or_default(),
+            member: field(part, "member").unwrap_or_default(),
+            count: field(part, "count")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        })
+        .collect()
 }

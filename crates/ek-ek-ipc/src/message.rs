@@ -82,10 +82,37 @@ pub struct Counters {
     pub configs_applied: u64,
     /// Configurations refused since the process started.
     pub configs_rejected: u64,
+    /// Backend connections that could not be opened since the process
+    /// started.
+    ///
+    /// A count rather than a state, because one refused connection is not a
+    /// sick node. Deciding that a member is unhealthy is the health check's
+    /// job (T-021, ADR-0034), and a state with no way back would drop this
+    /// node's VRRP priority over a single blip.
+    #[serde(default)]
+    pub backend_connect_failures: u64,
+}
+
+/// How many connections one member is carrying, and from where (ADR-0061).
+///
+/// The frontend is part of the key because the same pool can be published
+/// from two of them. Without it an operator sees a busy member and cannot
+/// tell which published service is filling it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenConnections {
+    /// The frontend the connections arrived on.
+    pub frontend: String,
+    /// The pool they were sent to.
+    pub pool: String,
+    /// The member inside that pool.
+    pub member: String,
+    /// How many are open right now.
+    pub count: u64,
 }
 
 /// A periodic report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusReport {
     /// The generation being served.
@@ -94,6 +121,14 @@ pub struct StatusReport {
     pub state: DataPlaneState,
     /// The counters at the moment of the report.
     pub counters: Counters,
+    /// Open connections, one entry per frontend, pool and member that has
+    /// any (ADR-0061).
+    ///
+    /// This is not in [`Counters`] because it goes down as well as up, and
+    /// a reader subtracting two reports of a counter would get nonsense from
+    /// it. Defaulted so a release that does not send it still reads.
+    #[serde(default)]
+    pub open_connections: Vec<OpenConnections>,
 }
 
 /// Why a delivered configuration was not applied.

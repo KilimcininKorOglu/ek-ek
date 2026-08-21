@@ -21,11 +21,17 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ek_ek_config::{AdminState, Backend, BackendMember, LoadBalancingAlgorithm};
+use ek_ek_ipc::OpenConnections;
 
 use crate::hashring::{HashRing, hash};
 
-/// Identifies one member of one pool, for counting open connections.
-type MemberKey = (String, String);
+/// Identifies where a connection came from and where it went, for counting
+/// open connections (ADR-0061).
+///
+/// The frontend is in the key because the same pool can be published from two
+/// of them, and an operator looking at a busy member needs to know which
+/// published service is filling it.
+type MemberKey = (String, String, String);
 
 /// Picks members and remembers how many connections each one is carrying.
 ///
@@ -103,11 +109,14 @@ impl Balancer {
                 members
                     .iter()
                     .min_by_key(|member| {
-                        let key = (pool.id.as_str().to_owned(), member.id.as_str().to_owned());
+                        // Every frontend counts. A member published from two
+                        // of them carries both loads, and counting only one
+                        // would make it look half as busy as it is.
+                        let carried = total_for(&open, pool.id.as_str(), member.id.as_str());
                         // Ties break on identity rather than on list order, so
                         // the answer does not depend on how the pool was typed
                         // in.
-                        (open.get(&key).copied().unwrap_or(0), member.id.as_str())
+                        (carried, member.id.as_str())
                     })
                     .copied()
             }
@@ -126,32 +135,82 @@ impl Balancer {
     }
 
     /// Records that a connection to a member has opened.
-    pub fn opened(&self, pool: &str, member: &str) {
+    pub fn opened(&self, frontend: &str, pool: &str, member: &str) {
         if let Ok(mut open) = self.open.lock() {
             *open
-                .entry((pool.to_owned(), member.to_owned()))
+                .entry((frontend.to_owned(), pool.to_owned(), member.to_owned()))
                 .or_insert(0) += 1;
         }
     }
 
     /// Records that a connection to a member has finished.
-    pub fn closed(&self, pool: &str, member: &str) {
+    ///
+    /// This must run however the connection ended. A count that only comes
+    /// down on a clean close leaves a member looking permanently busy, and
+    /// least connections then sends it nothing ever again.
+    pub fn closed(&self, frontend: &str, pool: &str, member: &str) {
         if let Ok(mut open) = self.open.lock()
-            && let Some(count) = open.get_mut(&(pool.to_owned(), member.to_owned()))
+            && let Some(count) =
+                open.get_mut(&(frontend.to_owned(), pool.to_owned(), member.to_owned()))
         {
             *count = count.saturating_sub(1);
         }
     }
 
-    /// Returns how many connections a member is carrying.
+    /// Returns how many connections a member is carrying, across every
+    /// frontend it is published from.
     #[must_use]
     pub fn open_connections(&self, pool: &str, member: &str) -> u64 {
         self.open
             .lock()
             .ok()
-            .and_then(|open| open.get(&(pool.to_owned(), member.to_owned())).copied())
+            .map(|open| total_for(&open, pool, member))
             .unwrap_or(0)
     }
+
+    /// Returns how many connections one frontend has open to one member.
+    #[must_use]
+    pub fn open_on(&self, frontend: &str, pool: &str, member: &str) -> u64 {
+        self.open
+            .lock()
+            .ok()
+            .and_then(|open| {
+                open.get(&(frontend.to_owned(), pool.to_owned(), member.to_owned()))
+                    .copied()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Reports every member that is carrying something, for the agent
+    /// (ADR-0061).
+    ///
+    /// A member with nothing open is left out rather than reported as zero,
+    /// so the report does not grow with every pool that has ever existed.
+    #[must_use]
+    pub fn report(&self) -> Vec<OpenConnections> {
+        self.open
+            .lock()
+            .map(|open| {
+                open.iter()
+                    .filter(|(_, count)| **count > 0)
+                    .map(|((frontend, pool, member), count)| OpenConnections {
+                        frontend: frontend.clone(),
+                        pool: pool.clone(),
+                        member: member.clone(),
+                        count: *count,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Adds up what one member carries across every frontend.
+fn total_for(open: &BTreeMap<MemberKey, u64>, pool: &str, member: &str) -> u64 {
+    open.iter()
+        .filter(|((_, at_pool, at_member), _)| at_pool == pool && at_member == member)
+        .map(|(_, count)| *count)
+        .sum()
 }
 
 /// Builds the ring a pool's consistent hashing walks.
