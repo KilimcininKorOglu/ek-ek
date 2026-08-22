@@ -11,6 +11,7 @@
 //! Everything else, backends included, changes inside this process.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,7 +106,11 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
 
         bindings.push(Binding {
             frontend: frontend.id.as_str().to_owned(),
-            address: format!("{}:{}", vip.address, frontend.port),
+            // Built through SocketAddr rather than by joining the two with a
+            // colon: an IPv6 address needs brackets around it, and without
+            // them the listener address does not parse and the frontend never
+            // binds.
+            address: SocketAddr::new(vip.address, frontend.port).to_string(),
             http2: frontend.http2.is_enabled(),
             terminates_tls: frontend.tls.is_some(),
             kind,

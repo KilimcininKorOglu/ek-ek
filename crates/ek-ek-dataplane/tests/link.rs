@@ -377,3 +377,24 @@ fn listeners_follow_the_frontends() {
         ErrorKind::Listener
     );
 }
+
+#[test]
+fn an_ipv6_vip_produces_an_address_that_can_be_bound() {
+    let mut sixed = config(1);
+    sixed.vips[0].address = "::1".parse().expect("a literal address parses");
+
+    let found = bindings(&sixed).expect("the frontends resolve");
+
+    // Written with brackets, because that is the only form a listener address
+    // parses in. Joining the address and the port with a colon would give
+    // `::1:8080`, which parses as nothing.
+    assert_eq!(found[0].address, "[::1]:8080");
+    assert!(
+        found[0].address.parse::<std::net::SocketAddr>().is_ok(),
+        "the address a listener is opened on must parse"
+    );
+
+    // An IPv4 VIP keeps the form it already had.
+    let found = bindings(&config(1)).expect("the frontends resolve");
+    assert_eq!(found[0].address, "127.0.0.1:8080");
+}
