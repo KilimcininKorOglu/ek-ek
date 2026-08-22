@@ -225,3 +225,56 @@ fn an_unknown_field_is_refused_rather_than_dropped() {
         "a misspelled key must fail loudly instead of being ignored"
     );
 }
+
+#[test]
+fn a_pool_that_names_no_connection_settings_gets_the_defaults() {
+    // A document written before these settings existed must still parse, and
+    // parse to the behaviour it had (ADR-0045).
+    let written = r#"{
+        "id": "web",
+        "members": [{"id":"web-1","address":"127.0.0.1","port":8080,"weight":1}],
+        "algorithm": "round_robin",
+        "health_check": null
+    }"#;
+
+    let pool: ek_ek_config::Backend =
+        serde_json::from_str(written).expect("a document naming none of them must still parse");
+
+    assert_eq!(pool.connection_pooling, ConnectionPooling::Enabled);
+    assert_eq!(pool.connection_pool_size, 128);
+    assert_eq!(pool.connection_lifetime_seconds, 300);
+}
+
+#[test]
+fn the_connection_settings_survive_a_serialisation_round_trip() {
+    // The other side. A field that serialised but did not read back would
+    // lose an operator's setting on the next delivery.
+    let written = r#"{
+        "id": "mapi",
+        "members": [{"id":"mapi-1","address":"127.0.0.1","port":8080,"weight":1}],
+        "algorithm": "round_robin",
+        "health_check": null,
+        "connection_pooling": "disabled",
+        "connection_pool_size": 16,
+        "connection_lifetime_seconds": 0
+    }"#;
+
+    let pool: ek_ek_config::Backend = serde_json::from_str(written).expect("this document parses");
+    let again: ek_ek_config::Backend =
+        serde_json::from_str(&serde_json::to_string(&pool).expect("it serialises"))
+            .expect("and reads back");
+
+    assert_eq!(again, pool);
+    assert_eq!(again.connection_pooling, ConnectionPooling::Disabled);
+    assert_eq!(again.connection_pool_size, 16);
+    assert_eq!(again.connection_lifetime_seconds, 0);
+    assert!(
+        again.limits_requests_in_flight(),
+        "sixteen is a limit; only zero is not"
+    );
+    assert_eq!(
+        again.reuse_group(0),
+        again.reuse_group(u64::from(u32::MAX)),
+        "a lifetime of zero retires nothing"
+    );
+}

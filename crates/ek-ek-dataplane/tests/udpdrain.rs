@@ -102,6 +102,8 @@ fn document(port: u16, member_port: u16, idle: u32, drain: u32) -> Config {
             health_check: None,
             stickiness: SessionStickiness::Disabled,
             connection_pooling: ConnectionPooling::Enabled,
+            connection_pool_size: Backend::default_pool_size(),
+            connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
         }],
         certificates: Vec::new(),
         dns_providers: Vec::new(),

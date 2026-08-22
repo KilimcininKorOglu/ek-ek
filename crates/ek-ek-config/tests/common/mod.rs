@@ -256,6 +256,8 @@ pub fn web_backend() -> Backend {
             same_site: SameSitePolicy::Lax,
         },
         connection_pooling: ConnectionPooling::Disabled,
+        connection_pool_size: Backend::default_pool_size(),
+        connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
     }
 }
 
@@ -282,6 +284,8 @@ pub fn dns_backend() -> Backend {
         }),
         stickiness: SessionStickiness::Disabled,
         connection_pooling: ConnectionPooling::Enabled,
+        connection_pool_size: Backend::default_pool_size(),
+        connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
     }
 }
 
@@ -309,5 +313,7 @@ pub fn passthrough_backend() -> Backend {
         }),
         stickiness: SessionStickiness::Disabled,
         connection_pooling: ConnectionPooling::Enabled,
+        connection_pool_size: Backend::default_pool_size(),
+        connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
     }
 }

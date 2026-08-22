@@ -629,6 +629,8 @@ fn add_backend(
         health_check,
         stickiness: SessionStickiness::Disabled,
         connection_pooling: pooling,
+        connection_pool_size: Backend::default_pool_size(),
+        connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
     });
     created.push(Created {
         kind: CreatedKind::Backend,

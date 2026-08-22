@@ -40,6 +40,8 @@ fn pool(id: &str, stickiness: SessionStickiness, members: Vec<BackendMember>) ->
         health_check: None,
         stickiness,
         connection_pooling: ConnectionPooling::Enabled,
+        connection_pool_size: Backend::default_pool_size(),
+        connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
     }
 }
 

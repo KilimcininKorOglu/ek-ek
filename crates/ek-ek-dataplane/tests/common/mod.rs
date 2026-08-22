@@ -97,6 +97,8 @@ pub fn config(members: u16) -> Config {
             health_check: None,
             stickiness: SessionStickiness::Disabled,
             connection_pooling: ConnectionPooling::Enabled,
+            connection_pool_size: Backend::default_pool_size(),
+            connection_lifetime_seconds: Backend::default_connection_lifetime_seconds(),
         }],
         certificates: Vec::new(),
         dns_providers: Vec::new(),
