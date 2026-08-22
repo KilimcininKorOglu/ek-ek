@@ -121,6 +121,7 @@ pub struct Status {
     configs_rejected: AtomicU64,
     backend_connect_failures: AtomicU64,
     tls_handshakes_refused: AtomicU64,
+    proxy_headers_without_an_address: AtomicU64,
     /// Where the open connection counts are read from (ADR-0061).
     ///
     /// Attached after the balancer exists rather than owned, because the
@@ -239,6 +240,20 @@ impl Status {
         self.tls_handshakes_refused.load(Ordering::Relaxed)
     }
 
+    /// Counts one PROXY header that had to be sent without an address in it
+    /// (ADR-0043).
+    pub fn proxy_header_without_an_address(&self) {
+        self.proxy_headers_without_an_address
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns how many PROXY headers went out stating no address.
+    #[must_use]
+    pub fn proxy_headers_without_an_address(&self) -> u64 {
+        self.proxy_headers_without_an_address
+            .load(Ordering::Relaxed)
+    }
+
     /// Reads the counters.
     #[must_use]
     pub fn counters(&self) -> Counters {
@@ -249,6 +264,9 @@ impl Status {
             backend_connect_failures: self.backend_connect_failures.load(Ordering::Relaxed),
             udp_sessions_evicted: self.udp_evicted(),
             tls_handshakes_refused: self.tls_handshakes_refused.load(Ordering::Relaxed),
+            proxy_headers_without_an_address: self
+                .proxy_headers_without_an_address
+                .load(Ordering::Relaxed),
         }
     }
 

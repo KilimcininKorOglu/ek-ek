@@ -140,6 +140,15 @@ pub struct Counters {
     /// is counted here or it is not visible at all.
     #[serde(default)]
     pub tls_handshakes_refused: u64,
+    /// PROXY headers sent without an address in them (ADR-0043).
+    ///
+    /// The header still goes, because the backend is waiting for one, but it
+    /// states no address and the backend falls back to the load balancer's.
+    /// Nothing else says so, and a number that keeps climbing is how an
+    /// operator finds out that the address their rules rest on is not the
+    /// client's.
+    #[serde(default)]
+    pub proxy_headers_without_an_address: u64,
 }
 
 /// How many connections one member is carrying, and from where (ADR-0061).

@@ -51,18 +51,39 @@ const TCP6: u8 = 0x21;
 /// Neither family nor protocol is stated, which is what LOCAL carries.
 const UNSPEC: u8 = 0x00;
 
+/// A header ready to be written, and what it managed to say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Header {
+    bytes: Vec<u8>,
+    stated: bool,
+}
+
+impl Header {
+    /// The bytes to write.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Whether the header names the client, or says it cannot.
+    ///
+    /// A header that names nobody leaves the backend deciding on the load
+    /// balancer's address, which is the very thing this exists to stop. It is
+    /// counted so an operator can see it happening (ADR-0043).
+    #[must_use]
+    pub const fn states_an_address(&self) -> bool {
+        self.stated
+    }
+}
+
 /// The bytes to send before anything else on a backend connection.
 ///
 /// Returns nothing when the frontend has the protocol turned off, which is
 /// the default: a backend that is not expecting a header refuses a connection
 /// that carries one (ADR-0043).
 #[must_use]
-pub fn header(format: ProxyProtocol, client: SocketAddr, proxy: SocketAddr) -> Option<Vec<u8>> {
-    match format {
-        ProxyProtocol::Disabled => None,
-        ProxyProtocol::V1 => Some(v1(pair(client, proxy))),
-        ProxyProtocol::V2 => Some(v2(pair(client, proxy))),
-    }
+pub fn header(format: ProxyProtocol, client: SocketAddr, proxy: SocketAddr) -> Option<Header> {
+    write(format, pair(client, proxy))
 }
 
 /// The header to send when the ends of the connection cannot be read.
@@ -70,12 +91,19 @@ pub fn header(format: ProxyProtocol, client: SocketAddr, proxy: SocketAddr) -> O
 /// The backend is expecting a header, so one is still sent; it says that no
 /// address is being stated rather than stating one that was made up.
 #[must_use]
-pub fn unknown(format: ProxyProtocol) -> Option<Vec<u8>> {
-    match format {
-        ProxyProtocol::Disabled => None,
-        ProxyProtocol::V1 => Some(v1(Ends::Untold)),
-        ProxyProtocol::V2 => Some(v2(Ends::Untold)),
-    }
+pub fn unknown(format: ProxyProtocol) -> Option<Header> {
+    write(format, Ends::Untold)
+}
+
+/// Builds the header for one format and one reading of the two ends.
+fn write(format: ProxyProtocol, ends: Ends) -> Option<Header> {
+    let stated = !matches!(ends, Ends::Untold);
+    let bytes = match format {
+        ProxyProtocol::Disabled => return None,
+        ProxyProtocol::V1 => v1(ends),
+        ProxyProtocol::V2 => v2(ends),
+    };
+    Some(Header { bytes, stated })
 }
 
 /// What a header states about the two ends.

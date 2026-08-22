@@ -255,15 +255,27 @@ fn ends(client: &Stream) -> Option<(SocketAddr, SocketAddr)> {
 ///
 /// A frontend with the protocol turned off sends nothing at all, which is
 /// what keeps a backend that does not expect a header working (ADR-0043).
-fn announce(format: ProxyProtocol, client: &Stream) -> Option<Vec<u8>> {
-    match ends(client) {
+#[must_use]
+pub fn announce(
+    format: ProxyProtocol,
+    ends: Option<(SocketAddr, SocketAddr)>,
+    status: &Status,
+) -> Option<Vec<u8>> {
+    let header = match ends {
         Some((peer, local)) => proxyproto::header(format, peer, local),
         // The connection is real and the backend is waiting for a header, so
         // one is sent saying no address is being stated. Sending nothing
         // would leave the backend reading the client's first bytes as a
         // header and refusing the connection.
         None => proxyproto::unknown(format),
+    }?;
+
+    if !header.states_an_address() {
+        // The backend is about to decide on the load balancer's address, and
+        // nothing else would say so (ADR-0043).
+        status.proxy_header_without_an_address();
     }
+    Some(header.bytes().to_vec())
 }
 
 /// Whether a configuration says this frontend is an L4 listener.
@@ -315,7 +327,7 @@ impl ServerApp for StreamProxy {
         // and reads it exactly once (ADR-0043). On a TLS passthrough frontend
         // this is also before the ClientHello, which is why the handshake is
         // unaffected.
-        if let Some(header) = announce(routed.proxy_protocol, &client)
+        if let Some(header) = announce(routed.proxy_protocol, ends(&client), &self.status)
             && (backend.write_all(&header).await.is_err() || backend.flush().await.is_err())
         {
             // The backend went away before the header landed. Nothing of the
