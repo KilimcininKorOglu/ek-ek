@@ -30,7 +30,7 @@ Yapılandırma Raft ile replike edilir. Raft'ın quorum kaybetmesi trafiği etki
 ### Kullanılan bileşenler
 
 - [pingora](https://github.com/cloudflare/pingora), HTTP data plane.
-- [rustls](https://github.com/rustls/rustls), TLS.
+- [OpenSSL](https://www.openssl.org/), TLS.
 - [openraft](https://github.com/databendlabs/openraft), yapılandırma replikasyonu.
 - SQLite, durum makinesi deposu.
 

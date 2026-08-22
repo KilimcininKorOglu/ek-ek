@@ -9,6 +9,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
+
 use ek_ek_config::{Config, SchemaVersion};
 use ek_ek_ipc::{
     AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, MemberHealth,
@@ -33,6 +35,7 @@ fn a_message_survives_a_round_trip() {
     let delivery = AgentMessage::Config(ConfigUpdate {
         generation: 12,
         config: empty_config(),
+        certificates: BTreeMap::new(),
     });
     let line = encode(&delivery).expect("it must encode");
     assert_eq!(
@@ -48,6 +51,7 @@ fn a_message_survives_a_round_trip() {
             configs_applied: 2,
             configs_rejected: 1,
             backend_connect_failures: 3,
+            tls_handshakes_refused: 4,
             udp_sessions_evicted: 9,
         },
         open_connections: vec![OpenConnections {
@@ -113,6 +117,7 @@ fn a_message_from_a_newer_release_is_refused_by_name() {
     let known = encode(&AgentMessage::Config(ConfigUpdate {
         generation: 1,
         config: empty_config(),
+        certificates: BTreeMap::new(),
     }))
     .expect("it must encode");
     decode::<AgentMessage>(&known).expect("a known message decodes");

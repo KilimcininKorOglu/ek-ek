@@ -64,6 +64,7 @@ pub fn sample() -> Config {
                 not_before_unix: 1_767_225_600,
                 not_after_unix: 1_775_001_600,
             }),
+            chain: Some(SecretId::new("chain-cert-web")),
             private_key: Some(SecretId::new("key-cert-web")),
         }],
         dns_providers: vec![
@@ -103,6 +104,7 @@ pub fn http_frontend() -> Frontend {
         application: ApplicationProtocol::Http,
         tls: Some(TlsSettings {
             certificates: vec![CertificateId::new("cert-web")],
+            default_certificate: Some(CertificateId::new("cert-web")),
             policy: TlsPolicyLevel::Balanced,
         }),
         proxy_protocol: ProxyProtocol::Disabled,

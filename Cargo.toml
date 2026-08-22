@@ -37,11 +37,16 @@ chacha20poly1305 = "0.11"
 getrandom = "0.4"
 tempfile = "3"
 
-# rustls rather than the default OpenSSL build, so no system TLS library has
-# to be present to compile the traffic path.
-pingora = { version = "0.8", default-features = false, features = ["rustls", "proxy", "lb"] }
+# OpenSSL rather than rustls: pingora's rustls backend refuses certificate
+# callbacks, and choosing a certificate per handshake from the SNI name is
+# what dynamic certificate resolution is (ADR-0068).
+pingora = { version = "0.8", default-features = false, features = ["openssl", "proxy", "lb"] }
 arc-swap = "1"
 async-trait = "0.1"
+# Only ever a dev-dependency. Tests build certificates and speak TLS from the
+# client side, and this is the library pingora's openssl backend already uses,
+# so both sides of a handshake agree on what a certificate is (ADR-0068).
+openssl = "0.10"
 # UDP listeners need SO_REUSEPORT so a replacement process can bind the port
 # the old one is still serving. The standard library has no way to set a
 # socket option before bind.

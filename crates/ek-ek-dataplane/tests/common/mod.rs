@@ -112,7 +112,11 @@ pub fn invalid_config() -> Config {
 }
 
 pub fn update(generation: u64, config: Config) -> ConfigUpdate {
-    ConfigUpdate { generation, config }
+    ConfigUpdate {
+        generation,
+        config,
+        certificates: std::collections::BTreeMap::new(),
+    }
 }
 
 /// A stand-in `node-agent`.

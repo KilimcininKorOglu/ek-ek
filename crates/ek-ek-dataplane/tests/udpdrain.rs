@@ -124,6 +124,7 @@ impl Running {
         let live = Arc::new(LiveConfig::new(ek_ek_ipc::ConfigUpdate {
             generation: 1,
             config: document(port, member_port, idle, drain),
+            certificates: std::collections::BTreeMap::new(),
         }));
         let status = Arc::new(Status::new());
         let balancer = Arc::new(Balancer::new());

@@ -26,8 +26,8 @@ pub mod message;
 pub mod wire;
 
 pub use message::{
-    AgentMessage, ConfigRejection, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello,
-    MemberHealth, OpenConnections, StatusReport, UdpSessions,
+    AgentMessage, CertificateMaterial, ConfigRejection, ConfigUpdate, Counters, DataPlaneMessage,
+    DataPlaneState, Hello, MemberHealth, OpenConnections, StatusReport, UdpSessions,
 };
 pub use wire::{Error, Result, decode, encode};
 

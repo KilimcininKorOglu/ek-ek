@@ -30,7 +30,7 @@ Configuration is replicated with Raft. Losing Raft quorum does not affect traffi
 ### Components used
 
 - [pingora](https://github.com/cloudflare/pingora), HTTP data plane.
-- [rustls](https://github.com/rustls/rustls), TLS.
+- [OpenSSL](https://www.openssl.org/), TLS.
 - [openraft](https://github.com/databendlabs/openraft), configuration replication.
 - SQLite, state machine store.
 

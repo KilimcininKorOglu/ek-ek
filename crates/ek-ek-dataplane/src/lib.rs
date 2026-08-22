@@ -19,7 +19,9 @@
 //! configuration only to new connections.
 
 pub mod balance;
+pub mod certs;
 pub mod error;
+pub mod handshake;
 pub mod hashring;
 pub mod health;
 pub mod link;
@@ -33,7 +35,9 @@ pub mod udp;
 pub mod udpproxy;
 
 pub use balance::{Balancer, ring_for};
+pub use certs::{Certificates, LoadFailure, Loaded};
 pub use error::{Error, ErrorKind, Result};
+pub use handshake::SniResolver;
 pub use hashring::{HashRing, hash};
 pub use health::{Change, Checked, Health, checked};
 pub use link::{AgentLink, RECONNECT_DELAY, STATUS_INTERVAL};

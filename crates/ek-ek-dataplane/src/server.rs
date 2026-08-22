@@ -18,12 +18,14 @@ use async_trait::async_trait;
 use ek_ek_config::{ApplicationProtocol, Config, TransportProtocol};
 use ek_ek_ipc::DataPlaneState;
 use pingora::apps::HttpServerOptions;
+use pingora::listeners::tls::TlsSettings;
 use pingora::server::{Server, ShutdownWatch};
 use pingora::services::background::background_service;
 use pingora::services::listening::Service;
 
 use crate::balance::Balancer;
 use crate::error::{Error, ErrorKind, Result};
+use crate::handshake::SniResolver;
 use crate::health::{Checked, Health, checked, watch};
 use crate::link::AgentLink;
 use crate::live::LiveConfig;
@@ -43,8 +45,12 @@ pub struct Binding {
     pub address: String,
     /// Whether this listener accepts cleartext HTTP/2 (ADR-0059).
     ///
-    /// Only meaningful on an HTTP listener.
+    /// Only meaningful on an HTTP listener that does not terminate TLS. Over
+    /// TLS the version is negotiated with ALPN instead.
     pub http2: bool,
+    /// Whether this listener terminates TLS, choosing its certificate per
+    /// handshake from the SNI name (ADR-0068).
+    pub terminates_tls: bool,
     /// What the listener does with the bytes it accepts.
     pub kind: ListenerKind,
 }
@@ -101,6 +107,7 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
             frontend: frontend.id.as_str().to_owned(),
             address: format!("{}:{}", vip.address, frontend.port),
             http2: frontend.http2.is_enabled(),
+            terminates_tls: frontend.tls.is_some(),
             kind,
         });
     }
@@ -154,12 +161,35 @@ pub fn build(link: AgentLink) -> Result<Server> {
                 // The struct is non-exhaustive, so it is built by default and
                 // then adjusted rather than written out field by field.
                 let mut options = HttpServerOptions::default();
-                options.h2c = binding.http2;
+                options.h2c = binding.http2 && !binding.terminates_tls;
                 if let Some(logic) = service.app_logic_mut() {
                     logic.server_options = Some(options);
                 }
 
-                service.add_tcp(&binding.address);
+                if binding.terminates_tls {
+                    let mut settings = TlsSettings::with_callbacks(Box::new(SniResolver::new(
+                        binding.frontend.clone(),
+                        Arc::clone(&live),
+                        Arc::clone(&status),
+                    )))
+                    .map_err(|error| {
+                        Error::new(
+                            ErrorKind::Listener,
+                            format!(
+                                "frontend {} cannot terminate TLS: {error}",
+                                binding.frontend
+                            ),
+                        )
+                    })?;
+                    // Over TLS the version is agreed with ALPN, so h2 is
+                    // offered here rather than through the h2c preface.
+                    if binding.http2 {
+                        settings.enable_h2();
+                    }
+                    service.add_tls_with_settings(&binding.address, None, settings);
+                } else {
+                    service.add_tcp(&binding.address);
+                }
                 server.add_service(service);
             }
             ListenerKind::Stream => {

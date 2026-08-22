@@ -384,9 +384,20 @@ impl ProxyHttp for Proxy {
         upstream_request
             .insert_header(FORWARDED_FOR, client_address(session).to_string())
             .ok();
-        // No TLS is terminated yet, so the client reached this listener over
-        // plaintext and the header says exactly that (M4 changes it).
-        upstream_request.insert_header(FORWARDED_PROTO, "http").ok();
+        // The request is forwarded as plain HTTP whatever the client used, so
+        // this header is the only way a backend can tell how the client
+        // reached the listener. It is read from the configuration rather than
+        // from the connection: a listener terminates TLS or it does not, and
+        // the client has no say in it.
+        let scheme = if self
+            .frontend(&self.live.load())
+            .is_some_and(|frontend| frontend.tls.is_some())
+        {
+            "https"
+        } else {
+            "http"
+        };
+        upstream_request.insert_header(FORWARDED_PROTO, scheme).ok();
 
         if let Some(host) = session
             .req_header()

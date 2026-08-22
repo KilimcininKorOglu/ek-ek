@@ -11,6 +11,8 @@
 
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
+pub mod tls;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -302,6 +304,31 @@ impl Drop for Member {
 /// and so a test can sign a value the way the product would.
 pub const STICKINESS_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
+/// Renders a string as a JSON string.
+///
+/// Written out rather than taken from a JSON library, because the harness
+/// speaks the wire format by hand on purpose: that is what proves the format
+/// is a protocol and not a shared type.
+fn quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if (other as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", other as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// A configuration document, written as text.
 pub struct Document {
     /// Port the frontend listens on.
@@ -338,6 +365,11 @@ pub struct Document {
     pub tls: String,
     /// Certificates, already rendered.
     pub certificates: String,
+    /// Chain and key of each certificate, keyed by identity.
+    ///
+    /// Carried here rather than beside the document, so a delivery always
+    /// names the material for the certificates it references (ADR-0069).
+    pub material: Vec<(String, String, String)>,
     /// Key the stickiness cookie is signed with, as hex.
     pub stickiness_key: String,
 }
@@ -364,6 +396,7 @@ impl Document {
             stickiness: r#"{"mode":"disabled"}"#.to_owned(),
             tls: "null".to_owned(),
             certificates: String::new(),
+            material: Vec::new(),
             stickiness_key: String::new(),
         }
     }
@@ -380,15 +413,69 @@ impl Document {
         self
     }
 
-    /// Says the frontend terminates TLS.
+    /// Adds a certificate the frontend can serve, with its material.
     ///
-    /// The listener is still plaintext until M4 brings termination, so a
-    /// test can still connect to it. What this changes now is what the
-    /// configuration says the client's scheme is.
+    /// The names are what a handshake is matched against, and a name of the
+    /// form `*.example.test` is a wildcard (ADR-0070).
     #[must_use]
-    pub fn terminating_tls(mut self) -> Self {
-        self.tls = r#"{"certificates":["cert-web"],"policy":"dengeli"}"#.to_owned();
-        self.certificates = r#"{"id":"cert-web","sni_names":["ek-ek.test"],"source":{"type":"manual_upload"},"validity":null,"private_key":null}"#.to_owned();
+    pub fn certificate(mut self, id: &str, names: &[&str], chain_pem: &str, key_pem: &str) -> Self {
+        let names = names
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let rendered = format!(
+            r#"{{"id":"{id}","sni_names":[{names}],"source":{{"type":"manual_upload"}},"validity":null,"chain":"chain-{id}","private_key":"key-{id}"}}"#
+        );
+        if self.certificates.is_empty() {
+            self.certificates = rendered;
+        } else {
+            self.certificates.push(',');
+            self.certificates.push_str(&rendered);
+        }
+        self.material
+            .push((id.to_owned(), chain_pem.to_owned(), key_pem.to_owned()));
+        self
+    }
+
+    /// Adds a certificate the configuration references but nothing delivers.
+    ///
+    /// This is what a frontend looks like when a certificate was configured
+    /// and its material never arrived.
+    #[must_use]
+    pub fn certificate_without_material(mut self, id: &str, names: &[&str]) -> Self {
+        let names = names
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let rendered = format!(
+            r#"{{"id":"{id}","sni_names":[{names}],"source":{{"type":"manual_upload"}},"validity":null,"chain":null,"private_key":null}}"#
+        );
+        if self.certificates.is_empty() {
+            self.certificates = rendered;
+        } else {
+            self.certificates.push(',');
+            self.certificates.push_str(&rendered);
+        }
+        self
+    }
+
+    /// Says the frontend terminates TLS with the certificates named.
+    ///
+    /// `default` is served when the SNI name matches nothing and when the
+    /// client sends no name; left out, both are refused (ADR-0070).
+    #[must_use]
+    pub fn terminating_tls(mut self, certificates: &[&str], default: Option<&str>) -> Self {
+        let listed = certificates
+            .iter()
+            .map(|id| format!("\"{id}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let default = default.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
+        self.tls = format!(
+            r#"{{"certificates":[{listed}],"default_certificate":{default},"policy":"dengeli"}}"#
+        );
         self
     }
 
@@ -522,12 +609,29 @@ impl Document {
         .replace('\n', "")
     }
 
+    /// Renders the certificate material, as the agent puts it on the wire.
+    #[must_use]
+    pub fn material(&self) -> String {
+        self.material
+            .iter()
+            .map(|(id, chain, key)| {
+                format!(
+                    r#""{id}":{{"chain_pem":{},"key_pem":{}}}"#,
+                    quoted(chain),
+                    quoted(key)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// Renders one delivery, as the agent puts it on the wire.
     #[must_use]
     pub fn delivery(&self, generation: u64) -> String {
         format!(
-            r#"{{"message":"config","generation":{generation},"config":{}}}"#,
-            self.render()
+            r#"{{"message":"config","generation":{generation},"config":{},"certificates":{{{}}}}}"#,
+            self.render(),
+            self.material()
         ) + "\n"
     }
 }
@@ -660,6 +764,29 @@ impl Agent {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         None
+    }
+
+    /// Waits until the report says at least `least` handshakes were refused.
+    ///
+    /// Reports arrive on a timer, so a test that read once would measure how
+    /// fast it ran rather than what the traffic path counted.
+    pub async fn wait_for_refused_handshakes(&self, least: u64) -> u64 {
+        let mut seen = 0;
+        for _ in 0..600 {
+            let line = self
+                .reports
+                .lock()
+                .ok()
+                .and_then(|store| store.as_ref().cloned());
+            if let Some(line) = line {
+                seen = Report::parse(&line).tls_handshakes_refused;
+                if seen >= least {
+                    return seen;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        seen
     }
 
     /// Returns the health entries of the last report.
@@ -1170,6 +1297,12 @@ impl Running {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Everything the process wrote to its diagnostics.
+    #[must_use]
+    pub fn complaints(&self) -> String {
+        self.data_plane.complaints()
     }
 
     /// The agent socket this run is using, so a replacement process can
@@ -1703,6 +1836,8 @@ pub struct Report {
     pub generation: u64,
     /// Open connections, per frontend, pool and member.
     pub open_connections: Vec<Open>,
+    /// How many handshakes were refused for want of a certificate.
+    pub tls_handshakes_refused: u64,
 }
 
 impl Report {
@@ -1715,6 +1850,9 @@ impl Report {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
             open_connections: open_connections(line),
+            tls_handshakes_refused: field(line, "tls_handshakes_refused")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
         }
     }
 }

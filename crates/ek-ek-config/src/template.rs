@@ -691,6 +691,7 @@ fn build_website(
         // answers on port 80.
         source: CertificateSource::AcmeHttp01,
         validity: None,
+        chain: None,
         private_key: None,
     });
     created.push(Created {
@@ -719,6 +720,10 @@ fn build_website(
             application: ApplicationProtocol::Http,
             tls: Some(TlsSettings {
                 certificates: vec![certificate],
+                // Left unset on purpose. A template that guessed a default
+                // would serve this certificate to names it does not cover,
+                // and the operator would only see it client side (ADR-0070).
+                default_certificate: None,
                 policy: crate::frontend::TlsPolicyLevel::Balanced,
             }),
             proxy_protocol: ProxyProtocol::Disabled,
@@ -933,6 +938,7 @@ fn build_exchange(
             application: ApplicationProtocol::Http,
             tls: Some(TlsSettings {
                 certificates: Vec::new(),
+                default_certificate: None,
                 policy: crate::frontend::TlsPolicyLevel::Balanced,
             }),
             proxy_protocol: ProxyProtocol::Disabled,

@@ -24,6 +24,12 @@ pub struct Certificate {
     pub source: CertificateSource,
     /// Validity window, once a certificate has actually been obtained.
     pub validity: Option<CertificateValidity>,
+    /// Reference to the stored certificate chain, leaf first.
+    ///
+    /// The chain is public, so sealing it costs something and buys nothing on
+    /// its own. It is stored beside the key anyway, because one path and one
+    /// rule are misused less often than two (ADR-0069).
+    pub chain: Option<SecretId>,
     /// Reference to the stored private key.
     ///
     /// Unset until the key exists, which is the case for an ACME order that

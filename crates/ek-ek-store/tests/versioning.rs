@@ -74,6 +74,7 @@ fn certificate(id: &str, name: &str) -> Certificate {
         sni_names: vec![name.to_owned()],
         source: CertificateSource::AcmeHttp01,
         validity: None,
+        chain: Some(SecretId::new("chain-cert-web")),
         private_key: Some(SecretId::new("key-cert-web")),
     }
 }

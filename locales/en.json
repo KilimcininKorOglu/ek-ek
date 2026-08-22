@@ -9,6 +9,7 @@
   "config.frontend.tls_without_http": "Frontend '{frontend}' carries TLS settings but does not speak HTTP.",
   "config.frontend.unknown_backend": "Frontend '{frontend}' names backend '{backend}', which is not defined.",
   "config.frontend.unknown_certificate": "Frontend '{frontend}' names certificate '{certificate}', which is not defined.",
+  "config.frontend.unknown_default_certificate": "The default certificate '{certificate}' of frontend '{frontend}' is not among the certificates that frontend offers.",
   "config.frontend.unknown_vip": "Frontend '{frontend}' names VIP '{vip}', which is not defined.",
   "config.health_check.timeout_above_interval": "The health check timeout of backend pool '{backend}' ({timeout_ms} ms) is longer than its interval ({interval_ms} ms).",
   "config.port.out_of_range": "{port} is not a valid port number.",

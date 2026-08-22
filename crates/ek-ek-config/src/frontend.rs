@@ -132,6 +132,14 @@ pub enum ApplicationProtocol {
 pub struct TlsSettings {
     /// Certificates offered, selected per handshake by SNI.
     pub certificates: Vec<CertificateId>,
+    /// Certificate served when the SNI name matches nothing, and when the
+    /// client sends no SNI name at all.
+    ///
+    /// It has to be one of `certificates`. Left unset, both of those
+    /// handshakes are refused and counted; a certificate is never picked at
+    /// random (ADR-0070).
+    #[serde(default)]
+    pub default_certificate: Option<CertificateId>,
     /// Protocol versions and cipher suites, chosen as a level rather than as
     /// a list (ADR-0028).
     #[serde(default)]

@@ -3,8 +3,11 @@
 
 //! What the two processes say to each other.
 
-use ek_ek_config::Config;
+use std::collections::BTreeMap;
+use std::fmt;
+
 use ek_ek_config::validation::ValidationError;
+use ek_ek_config::{CertificateId, Config};
 use serde::{Deserialize, Serialize};
 
 /// Anything `node-agent` sends to `data-plane`.
@@ -52,6 +55,39 @@ pub struct ConfigUpdate {
     /// The whole configuration. There is no partial update, because the
     /// state machine behind the agent applies whole states as well.
     pub config: Config,
+    /// Key material for the certificates the configuration references.
+    ///
+    /// It travels with the configuration rather than on a channel of its own,
+    /// so `data-plane` never holds a configuration naming a certificate whose
+    /// material has not arrived (ADR-0069). The agent reads it from the store
+    /// and decrypts it; the socket is `0600` and never leaves the machine.
+    #[serde(default)]
+    pub certificates: BTreeMap<CertificateId, CertificateMaterial>,
+}
+
+/// One certificate's chain and private key, both as PEM.
+///
+/// PEM rather than raw bytes because that is what the TLS library loads and
+/// what survives a JSON line without an encoding step.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateMaterial {
+    /// The chain, leaf first.
+    pub chain_pem: String,
+    /// The private key.
+    pub key_pem: String,
+}
+
+impl fmt::Debug for CertificateMaterial {
+    /// Prints neither half.
+    ///
+    /// The chain is public, but printing it beside a redacted key invites
+    /// somebody to relax the rule for the other field too.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CertificateMaterial")
+            .finish_non_exhaustive()
+    }
 }
 
 /// What `data-plane` is doing.
@@ -97,6 +133,13 @@ pub struct Counters {
     /// traffic, which is the only way an operator finds that out.
     #[serde(default)]
     pub udp_sessions_evicted: u64,
+    /// TLS handshakes refused because no certificate covered what the client
+    /// asked for (ADR-0070).
+    ///
+    /// A refusal is silent on this side and only visible to the client, so it
+    /// is counted here or it is not visible at all.
+    #[serde(default)]
+    pub tls_handshakes_refused: u64,
 }
 
 /// How many connections one member is carrying, and from where (ADR-0061).

@@ -14,7 +14,7 @@ mod common;
 
 use common::{
     Document, Member, Running, ask_once, free_port, plain_request, request_with_cookie,
-    request_with_cookie_line,
+    request_with_cookie_line, tls,
 };
 
 /// The cookie every test here uses, unless it is measuring the name itself.
@@ -541,15 +541,26 @@ async fn stickiness_survives_a_member_changing_address() {
 async fn a_frontend_that_terminates_tls_marks_the_cookie_secure() {
     let one = Member::start("one").await;
     let port = free_port();
+    let authority = tls::Authority::new();
+    let leaf = authority.issue(&["ek-ek.test"]);
     let document = Document::new(port, vec![one.entry(1, "enabled")])
-        .terminating_tls()
+        .certificate(
+            "cert-web",
+            &["ek-ek.test"],
+            &authority.chain_pem(&leaf),
+            &leaf.key_pem(),
+        )
+        .terminating_tls(&["cert-web"], Some("cert-web"))
         .sticky(COOKIE, "lax");
     let running = Running::start(&document).await;
 
-    let line = ask_once(running.port, &plain_request())
-        .await
-        .expect("a request must be answered")
-        .set_cookie(COOKIE)
+    // Spoken over real TLS, because the frontend really terminates it now.
+    let answer = tls::request(running.port, "ek-ek.test", &plain_request())
+        .expect("a request must be answered");
+    let line = answer
+        .lines()
+        .find(|line| line.starts_with("Set-Cookie: "))
+        .map(|line| line.trim_start_matches("Set-Cookie: ").to_owned())
         .expect("the answer must carry the cookie");
 
     assert!(

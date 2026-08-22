@@ -36,10 +36,6 @@ ignore = [
     # Unmaintained, not a vulnerability. A proc-macro that only generates
     # derive code at compile time, so it has no runtime surface.
     { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; compile-time only" },
-    # Unmaintained, not a vulnerability. It reads certificate and key files
-    # from disk, which are our own files rather than network input. The
-    # replacement lives in rustls-pki-types and needs a pingora change.
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; reads our own files, not network input" },
 ]
 
 [licenses]

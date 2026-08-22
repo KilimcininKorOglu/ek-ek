@@ -49,6 +49,9 @@ pub enum ErrorCode {
     /// A frontend names a certificate that is not defined.
     #[serde(rename = "config.frontend.unknown_certificate")]
     FrontendUnknownCertificate,
+    /// A frontend's default certificate is not one it offers.
+    #[serde(rename = "config.frontend.unknown_default_certificate")]
+    FrontendUnknownDefaultCertificate,
     /// A frontend carries TLS settings without terminating TLS.
     #[serde(rename = "config.frontend.tls_without_http")]
     FrontendTlsWithoutHttp,
@@ -95,12 +98,13 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
         Self::FrontendUnknownBackend,
         Self::FrontendUnknownCertificate,
+        Self::FrontendUnknownDefaultCertificate,
         Self::FrontendTlsWithoutHttp,
         Self::FrontendRedirectWithoutHttp,
         Self::VipInUse,
@@ -126,6 +130,9 @@ impl ErrorCode {
             Self::FrontendUnknownVip => "config.frontend.unknown_vip",
             Self::FrontendUnknownBackend => "config.frontend.unknown_backend",
             Self::FrontendUnknownCertificate => "config.frontend.unknown_certificate",
+            Self::FrontendUnknownDefaultCertificate => {
+                "config.frontend.unknown_default_certificate"
+            }
             Self::FrontendTlsWithoutHttp => "config.frontend.tls_without_http",
             Self::FrontendRedirectWithoutHttp => "config.frontend.redirect_without_http",
             Self::VipInUse => "config.vip.in_use",
@@ -564,6 +571,22 @@ fn check_frontend_references(config: &Config, errors: &mut Vec<ValidationError>)
                         .with_id("certificate", certificate.as_str()),
                     );
                 }
+            }
+
+            // Checked against what this frontend offers rather than against
+            // every certificate defined: a default the frontend does not
+            // serve could never be selected (ADR-0070).
+            if let Some(certificate) = &tls.default_certificate
+                && !tls.certificates.contains(certificate)
+            {
+                errors.push(
+                    ValidationError::new(
+                        ErrorCode::FrontendUnknownDefaultCertificate,
+                        here().field("tls").field("default_certificate"),
+                    )
+                    .with_id("frontend", frontend.id.as_str())
+                    .with_id("certificate", certificate.as_str()),
+                );
             }
         }
     }

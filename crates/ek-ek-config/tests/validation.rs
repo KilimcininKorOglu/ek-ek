@@ -356,6 +356,61 @@ fn three_faults_produce_three_errors() {
 }
 
 #[test]
+fn a_default_certificate_the_frontend_does_not_offer_is_refused() {
+    // A default outside the frontend's own list could never be selected, so
+    // the operator would see a refused handshake and no reason for it.
+    let mut config = sample();
+    config.frontends[0]
+        .tls
+        .as_mut()
+        .expect("the fixture terminates TLS here")
+        .default_certificate = Some(CertificateId::new("cert-web-2"));
+    config.certificates.push(ek_ek_config::Certificate {
+        id: CertificateId::new("cert-web-2"),
+        sni_names: vec!["other.example.org".to_owned()],
+        source: ek_ek_config::CertificateSource::ManualUpload,
+        validity: None,
+        chain: None,
+        private_key: None,
+    });
+
+    let found = faults(&config);
+
+    assert!(
+        found.contains(ErrorCode::FrontendUnknownDefaultCertificate),
+        "a default outside the frontend's list was accepted: {:?}",
+        found.codes()
+    );
+}
+
+#[test]
+fn a_default_certificate_the_frontend_offers_is_accepted() {
+    // The other side. The fixture already names its own certificate as the
+    // default, so a rule that refused every default would fail here.
+    assert!(
+        validate(&sample()).is_ok(),
+        "a default the frontend offers was refused"
+    );
+}
+
+#[test]
+fn a_frontend_with_no_default_certificate_is_accepted() {
+    // Leaving it unset is the configuration that refuses unmatched
+    // handshakes, and it must not be an error in itself (ADR-0070).
+    let mut config = sample();
+    config.frontends[0]
+        .tls
+        .as_mut()
+        .expect("the fixture terminates TLS here")
+        .default_certificate = None;
+
+    assert!(
+        validate(&config).is_ok(),
+        "leaving the default unset was refused"
+    );
+}
+
+#[test]
 fn a_duplicate_identity_is_refused() {
     let mut config = sample();
     let twin = config.backends[0].clone();

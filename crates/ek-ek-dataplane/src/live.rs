@@ -22,10 +22,11 @@ use ek_ek_config::{Config, ValidationErrors, validate};
 use ek_ek_ipc::{ConfigUpdate, Counters, DataPlaneState, StatusReport, UdpSessions};
 
 use crate::balance::{Balancer, ring_for};
+use crate::certs::Certificates;
 use crate::hashring::HashRing;
 
 /// A configuration together with the delivery it came from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Live {
     /// Which delivery this is.
     pub generation: u64,
@@ -38,20 +39,29 @@ pub struct Live {
     /// belongs to, so a request never reads a ring built from a different
     /// member list than the one it is choosing from.
     pub rings: BTreeMap<String, HashRing>,
+    /// The certificates every TLS frontend can serve, already parsed.
+    ///
+    /// Parsed here rather than per handshake, and swapped together with the
+    /// configuration that references them, so a handshake never reads a new
+    /// configuration against an old certificate set (ADR-0068).
+    pub certificates: Arc<Certificates>,
 }
 
 impl Live {
-    /// Builds the rings that go with a configuration.
-    fn build(generation: u64, config: Config) -> Self {
-        let rings = config
+    /// Builds the rings and certificates that go with a configuration.
+    fn build(update: ConfigUpdate) -> Self {
+        let rings = update
+            .config
             .backends
             .iter()
             .map(|pool| (pool.id.as_str().to_owned(), ring_for(pool)))
             .collect();
+        let certificates = Arc::new(Certificates::build(&update.config, &update.certificates));
         Self {
-            generation,
-            config,
+            generation: update.generation,
+            config: update.config,
             rings,
+            certificates,
         }
     }
 
@@ -70,10 +80,7 @@ impl LiveConfig {
     /// Starts from a delivery that has already been checked.
     #[must_use]
     pub fn new(update: ConfigUpdate) -> Self {
-        Self(ArcSwap::from_pointee(Live::build(
-            update.generation,
-            update.config,
-        )))
+        Self(ArcSwap::from_pointee(Live::build(update)))
     }
 
     /// Takes the snapshot to serve one request from.
@@ -100,8 +107,7 @@ impl LiveConfig {
     /// untouched in that case, so a bad delivery costs nothing.
     pub fn apply(&self, update: ConfigUpdate) -> Result<(), ValidationErrors> {
         validate(&update.config)?;
-        self.0
-            .store(Arc::new(Live::build(update.generation, update.config)));
+        self.0.store(Arc::new(Live::build(update)));
         Ok(())
     }
 }
@@ -114,6 +120,7 @@ pub struct Status {
     configs_applied: AtomicU64,
     configs_rejected: AtomicU64,
     backend_connect_failures: AtomicU64,
+    tls_handshakes_refused: AtomicU64,
     /// Where the open connection counts are read from (ADR-0061).
     ///
     /// Attached after the balancer exists rather than owned, because the
@@ -221,6 +228,17 @@ impl Status {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records a handshake refused for want of a certificate (ADR-0070).
+    pub fn tls_handshake_refused(&self) {
+        self.tls_handshakes_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns how many handshakes have been refused.
+    #[must_use]
+    pub fn tls_handshakes_refused(&self) -> u64 {
+        self.tls_handshakes_refused.load(Ordering::Relaxed)
+    }
+
     /// Reads the counters.
     #[must_use]
     pub fn counters(&self) -> Counters {
@@ -230,6 +248,7 @@ impl Status {
             configs_rejected: self.configs_rejected.load(Ordering::Relaxed),
             backend_connect_failures: self.backend_connect_failures.load(Ordering::Relaxed),
             udp_sessions_evicted: self.udp_evicted(),
+            tls_handshakes_refused: self.tls_handshakes_refused.load(Ordering::Relaxed),
         }
     }
 
