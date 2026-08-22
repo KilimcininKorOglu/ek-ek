@@ -38,6 +38,7 @@ pub mod frontend;
 pub mod health;
 pub mod i18n;
 pub mod id;
+pub mod logging;
 pub mod node;
 pub mod template;
 pub mod validation;
@@ -62,6 +63,7 @@ pub use id::{
     BackendId, CertificateId, DnsProviderId, FrontendId, MemberId, NodeId, SecretId, TemplateId,
     VipId,
 };
+pub use logging::{AccessLog, LogLevel};
 pub use node::{Node, NodeRole};
 pub use template::{
     Applied, Argument, Arguments, Created, CreatedKind, Parameter, ParameterKind, Template,

@@ -88,6 +88,7 @@ pub fn sample() -> Config {
             },
         ],
         stickiness_key: STICKINESS_KEY.to_owned(),
+        log_level: Default::default(),
     }
 }
 
@@ -108,6 +109,7 @@ pub fn http_frontend() -> Frontend {
             policy: TlsPolicyLevel::Balanced,
         }),
         proxy_protocol: ProxyProtocol::Disabled,
+        access_log: Default::default(),
         routing_rules: vec![
             RoutingRule {
                 host_pattern: Some("mail.example.org".to_owned()),
@@ -157,6 +159,7 @@ pub fn passthrough_frontend() -> Frontend {
         application: ApplicationProtocol::TlsPassthrough,
         tls: None,
         proxy_protocol: ProxyProtocol::V2,
+        access_log: Default::default(),
         routing_rules: Vec::new(),
         sni_rules: vec![SniRule {
             sni_pattern: "mail.example.org".to_owned(),
@@ -181,6 +184,7 @@ pub fn dns_tcp_frontend() -> Frontend {
         application: ApplicationProtocol::Raw,
         tls: None,
         proxy_protocol: ProxyProtocol::Disabled,
+        access_log: Default::default(),
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(BackendId::new("dns")),
@@ -202,6 +206,7 @@ pub fn dns_udp_frontend() -> Frontend {
         application: ApplicationProtocol::Raw,
         tls: None,
         proxy_protocol: ProxyProtocol::Disabled,
+        access_log: Default::default(),
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(BackendId::new("dns")),

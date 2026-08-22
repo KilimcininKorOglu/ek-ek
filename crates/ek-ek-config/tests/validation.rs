@@ -609,3 +609,55 @@ fn a_stickiness_cookie_name_that_breaks_the_header_is_refused() {
         );
     }
 }
+
+#[test]
+fn an_access_log_that_is_on_and_samples_nothing_is_refused() {
+    // One in zero is not a rate. Left through, it would be read as a
+    // division and the frontend would write nothing while claiming to log.
+    let mut config = sample();
+    config.frontends[0].access_log.enabled = true;
+    config.frontends[0].access_log.sample_one_in = 0;
+
+    let found = faults(&config);
+
+    assert_eq!(found.codes(), vec![ErrorCode::FrontendAccessLogSampleZero]);
+    assert_eq!(
+        found.as_slice()[0].parameters.get("frontend"),
+        Some(&ParameterValue::Identifier("web-https".to_owned())),
+        "the error must name the frontend it blames"
+    );
+}
+
+#[test]
+fn an_access_log_that_is_off_may_name_no_rate_at_all() {
+    // The other side. A frontend that logs nothing has no rate to check, so
+    // the rule must not fire on it.
+    let mut config = sample();
+    config.frontends[0].access_log.enabled = false;
+    config.frontends[0].access_log.sample_one_in = 0;
+
+    assert!(
+        validate(&config).is_ok(),
+        "a frontend with the access log off carries no rate to judge"
+    );
+}
+
+#[test]
+fn a_frontend_that_never_names_an_access_log_writes_every_request() {
+    // The default, read off the model rather than assumed: on, and no
+    // sampling. An operator who says nothing gets a full access log.
+    let config = sample();
+    let access = &config.frontends[0].access_log;
+
+    assert!(
+        access.enabled,
+        "the access log is on unless it is turned off"
+    );
+    assert_eq!(access.sample_one_in, 1);
+    for request in 0..10 {
+        assert!(
+            access.writes(request),
+            "every request is written by default"
+        );
+    }
+}

@@ -123,6 +123,7 @@ fn document(offers: &[&str], default: Option<&str>, certificates: Vec<Certificat
                 policy: TlsPolicyLevel::Balanced,
             }),
             proxy_protocol: ProxyProtocol::Disabled,
+            access_log: Default::default(),
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
             default_backend: Some(BackendId::new("pool")),
@@ -150,6 +151,7 @@ fn document(offers: &[&str], default: Option<&str>, certificates: Vec<Certificat
         certificates,
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

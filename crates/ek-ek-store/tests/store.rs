@@ -64,6 +64,7 @@ fn config(marker: u32) -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

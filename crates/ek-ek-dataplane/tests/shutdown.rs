@@ -29,6 +29,7 @@ fn frontend(name: &str, port: u16, drain: u32) -> Frontend {
         application: ApplicationProtocol::Raw,
         tls: None,
         proxy_protocol: ProxyProtocol::Disabled,
+        access_log: Default::default(),
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: None,
@@ -58,6 +59,7 @@ fn document(frontends: Vec<Frontend>) -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

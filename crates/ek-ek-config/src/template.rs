@@ -50,6 +50,7 @@ use crate::frontend::{
 };
 use crate::health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
 use crate::id::{BackendId, CertificateId, FrontendId, MemberId, NodeId, TemplateId, VipId};
+use crate::logging::AccessLog;
 use crate::validation::{ErrorCode, FieldPath, ValidationError, ValidationErrors, validate};
 use crate::vip::Vip;
 
@@ -727,6 +728,7 @@ fn build_website(
                 policy: crate::frontend::TlsPolicyLevel::Balanced,
             }),
             proxy_protocol: ProxyProtocol::Disabled,
+            access_log: AccessLog::default(),
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
             default_backend: Some(backend),
@@ -756,6 +758,7 @@ fn build_website(
             application: ApplicationProtocol::Http,
             tls: None,
             proxy_protocol: ProxyProtocol::Disabled,
+            access_log: AccessLog::default(),
             routing_rules: vec![RoutingRule {
                 // Matches everything, which is what a redirect listener is.
                 host_pattern: None,
@@ -825,6 +828,7 @@ fn build_dns(config: &mut Config, created: &mut Vec<Created>, values: &Common<'_
                 application: ApplicationProtocol::Raw,
                 tls: None,
                 proxy_protocol: ProxyProtocol::Disabled,
+                access_log: AccessLog::default(),
                 routing_rules: Vec::new(),
                 sni_rules: Vec::new(),
                 default_backend: Some(backend.clone()),
@@ -947,6 +951,7 @@ fn build_exchange(
                 policy: crate::frontend::TlsPolicyLevel::Balanced,
             }),
             proxy_protocol: ProxyProtocol::Disabled,
+            access_log: AccessLog::default(),
             routing_rules: rules,
             sni_rules: Vec::new(),
             default_backend: Some(owa),
@@ -1035,6 +1040,7 @@ fn raw_frontend(
         application: ApplicationProtocol::Raw,
         tls: None,
         proxy_protocol,
+        access_log: AccessLog::default(),
         routing_rules: Vec::new(),
         sni_rules: Vec::new(),
         default_backend: Some(backend),

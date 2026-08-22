@@ -44,6 +44,7 @@ fn frontend(rules: Vec<RoutingRule>, default: Option<&str>) -> Frontend {
         application: ApplicationProtocol::Http,
         tls: None,
         proxy_protocol: ProxyProtocol::Disabled,
+        access_log: Default::default(),
         routing_rules: rules,
         sni_rules: Vec::new(),
         default_backend: default.map(BackendId::new),
@@ -520,6 +521,7 @@ fn document(rules: Vec<RoutingRule>) -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

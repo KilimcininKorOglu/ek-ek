@@ -108,6 +108,7 @@ fn config_at_v1() -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

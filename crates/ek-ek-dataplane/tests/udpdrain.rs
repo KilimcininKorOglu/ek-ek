@@ -78,6 +78,7 @@ fn document(port: u16, member_port: u16, idle: u32, drain: u32) -> Config {
             application: ApplicationProtocol::Raw,
             tls: None,
             proxy_protocol: ProxyProtocol::Disabled,
+            access_log: Default::default(),
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
             default_backend: Some(BackendId::new("pool")),
@@ -105,6 +106,7 @@ fn document(port: u16, member_port: u16, idle: u32, drain: u32) -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

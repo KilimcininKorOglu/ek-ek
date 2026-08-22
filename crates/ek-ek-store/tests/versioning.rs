@@ -65,6 +65,7 @@ fn config(nodes: u32) -> Config {
         certificates: vec![certificate("cert-web", "www.example.org")],
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 

@@ -52,6 +52,9 @@ pub enum ErrorCode {
     /// A frontend's default certificate is not one it offers.
     #[serde(rename = "config.frontend.unknown_default_certificate")]
     FrontendUnknownDefaultCertificate,
+    /// A frontend samples its access log at a rate that writes nothing.
+    #[serde(rename = "config.frontend.access_log_sample_zero")]
+    FrontendAccessLogSampleZero,
     /// A frontend carries TLS settings without terminating TLS.
     #[serde(rename = "config.frontend.tls_without_http")]
     FrontendTlsWithoutHttp,
@@ -98,13 +101,14 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
         Self::FrontendUnknownBackend,
         Self::FrontendUnknownCertificate,
         Self::FrontendUnknownDefaultCertificate,
+        Self::FrontendAccessLogSampleZero,
         Self::FrontendTlsWithoutHttp,
         Self::FrontendRedirectWithoutHttp,
         Self::VipInUse,
@@ -133,6 +137,7 @@ impl ErrorCode {
             Self::FrontendUnknownDefaultCertificate => {
                 "config.frontend.unknown_default_certificate"
             }
+            Self::FrontendAccessLogSampleZero => "config.frontend.access_log_sample_zero",
             Self::FrontendTlsWithoutHttp => "config.frontend.tls_without_http",
             Self::FrontendRedirectWithoutHttp => "config.frontend.redirect_without_http",
             Self::VipInUse => "config.vip.in_use",
@@ -340,6 +345,7 @@ pub fn validate(config: &Config) -> Result<(), ValidationErrors> {
     check_stickiness_against_transport(config, &mut errors);
     check_stickiness_key(config, &mut errors);
     check_stickiness_cookie_name(config, &mut errors);
+    check_access_log(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -825,6 +831,31 @@ fn check_stickiness_cookie_name(config: &Config, errors: &mut Vec<ValidationErro
                     .field("cookie_name"),
             )
             .with_id("backend", backend.id.as_str()),
+        );
+    }
+}
+
+/// Refuses an access log sample rate that writes nothing.
+///
+/// A rate of zero reads as "one record in zero requests", which is not a rate
+/// at all. Left alone it would silently behave like a switched off access log
+/// while the setting still says the log is on (ADR-0037).
+fn check_access_log(config: &Config, errors: &mut Vec<ValidationError>) {
+    for (at, frontend) in config.frontends.iter().enumerate() {
+        if !frontend.access_log.enabled || frontend.access_log.sample_one_in > 0 {
+            continue;
+        }
+
+        errors.push(
+            ValidationError::new(
+                ErrorCode::FrontendAccessLogSampleZero,
+                FieldPath::root()
+                    .field("frontends")
+                    .index(at)
+                    .field("access_log")
+                    .field("sample_one_in"),
+            )
+            .with_id("frontend", frontend.id.as_str()),
         );
     }
 }

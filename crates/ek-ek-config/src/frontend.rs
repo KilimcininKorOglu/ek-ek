@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{BackendId, CertificateId, FrontendId, VipId};
+use crate::logging::AccessLog;
 
 /// A listening endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +38,10 @@ pub struct Frontend {
     /// Whether the client address is forwarded with a PROXY protocol header.
     #[serde(default)]
     pub proxy_protocol: ProxyProtocol,
+    /// Whether and how often this frontend writes an access record
+    /// (ADR-0037).
+    #[serde(default)]
+    pub access_log: AccessLog,
     /// Ordered host and path rules, applied first match wins (ADR-0044).
     ///
     /// Order is part of the configuration, so it is preserved exactly as the

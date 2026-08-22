@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::Backend;
 use crate::certificate::{Certificate, DnsProvider};
 use crate::frontend::Frontend;
+use crate::logging::LogLevel;
 use crate::node::Node;
 use crate::vip::Vip;
 
@@ -43,6 +44,13 @@ pub struct Config {
     /// a pool actually asks for cookie stickiness.
     #[serde(default)]
     pub stickiness_key: String,
+    /// How much detail the application log carries (ADR-0037).
+    ///
+    /// It sits at the root because logging is a property of the process, and
+    /// it sits in the configuration rather than in an environment variable so
+    /// an operator can change it without restarting anything.
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 /// The schema a configuration record was written against.
