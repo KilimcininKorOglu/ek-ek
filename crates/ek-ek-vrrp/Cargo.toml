@@ -17,9 +17,11 @@ path = "src/bin/ek-ek-vrrp-node.rs"
 # Must never depend on ek-ek-dataplane (ADR-0014).
 [dependencies]
 
-# The raw socket only exists on Linux, and so does the capability it needs.
+# The sockets only exist on Linux, and so do the capabilities they need.
 [target.'cfg(target_os = "linux")'.dependencies]
 socket2 = { workspace = true }
+# Only for the address that names which interface a raw frame leaves from.
+libc = { workspace = true }
 
 [lints]
 workspace = true

@@ -41,7 +41,6 @@ fn start(
     preempt: bool,
 ) -> Background {
     let address = node.address().to_string();
-    let virtual_address = virtual_address.to_string();
     let priority = priority.to_string();
     let interval = INTERVAL_MS.to_string();
 
@@ -49,8 +48,10 @@ fn start(
         binary.to_owned(),
         "--address".to_owned(),
         address,
+        "--interface".to_owned(),
+        "eth0".to_owned(),
         "--virtual-address".to_owned(),
-        virtual_address,
+        format!("{virtual_address}/24"),
         "--vrid".to_owned(),
         VRID.to_owned(),
         "--priority".to_owned(),
@@ -126,6 +127,10 @@ fn reached_at(output: &str, state: &str) -> Option<u128> {
 #[test]
 fn the_advertisement_on_the_wire_is_a_vrrpv3_advertisement() {
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -178,6 +183,10 @@ fn no_advertisement_reaches_the_multicast_group() {
     // optional: VRRPv3 has no authentication, so a group anyone can join is a
     // virtual router anyone can claim (R-02).
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -219,6 +228,10 @@ fn no_advertisement_reaches_the_multicast_group() {
 #[test]
 fn the_stronger_node_takes_the_role_and_the_weaker_one_gives_it_up() {
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -245,6 +258,10 @@ fn the_stronger_node_takes_the_role_and_the_weaker_one_gives_it_up() {
 #[test]
 fn a_backup_takes_over_within_the_master_down_interval() {
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -307,6 +324,10 @@ fn a_backup_takes_over_within_the_master_down_interval() {
 #[test]
 fn preempt_on_gives_the_role_back_and_preempt_off_does_not() {
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -358,6 +379,10 @@ fn an_advertisement_from_outside_the_peer_list_moves_nothing() {
     // all. A node that acted on this would hand its virtual router to anyone
     // on the segment (R-02).
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");
@@ -401,6 +426,10 @@ fn a_cold_start_settles_on_the_strongest_node() {
     // and closes on the first advertisement; what must not happen is the
     // cluster settling anywhere but on the strongest node (T-010).
     let cluster = Cluster::start().expect("cluster should start");
+    // The routers move real addresses now, so a run that failed halfway
+    // would leave one on an interface and the next test would read it as
+    // its own result.
+    cluster.reset().expect("the cluster should start clean");
     let binary = cluster
         .install_binary("ek-ek-vrrp", "ek-ek-vrrp-node")
         .expect("the virtual router binary should build");

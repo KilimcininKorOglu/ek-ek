@@ -57,6 +57,11 @@ openssl = "0.10"
 # the old one is still serving. The standard library has no way to set a
 # socket option before bind.
 socket2 = { version = "0.6", features = ["all"] }
+# Two kernel address structures socket2 does not model: the one that names
+# which interface a raw frame leaves from, and the storage it is copied into.
+# Already in the tree through socket2 itself, so it adds no supply chain
+# surface (ADR-0073).
+libc = "0.2"
 # The stickiness cookie is a keyed hash, so the traffic path needs an HMAC.
 # RustCrypto rather than a TLS library's own: the crates are already in the
 # tree through chacha20poly1305 and carry no C code.

@@ -67,7 +67,7 @@ fn transitions(actions: &[Action]) -> Vec<(State, State, Reason)> {
         .iter()
         .filter_map(|action| match action {
             Action::Record(transition) => Some((transition.from, transition.to, transition.reason)),
-            Action::Advertise(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -78,9 +78,19 @@ fn advertisements(actions: &[Action]) -> Vec<&Advertisement> {
         .iter()
         .filter_map(|action| match action {
             Action::Advertise(advertisement) => Some(advertisement),
-            Action::Record(_) => None,
+            _ => None,
         })
         .collect()
+}
+
+/// Whether a set of actions asks for the addresses to be taken.
+fn takes(actions: &[Action]) -> bool {
+    actions.contains(&Action::TakeAddresses)
+}
+
+/// Whether a set of actions asks for the addresses to be dropped.
+fn drops(actions: &[Action]) -> bool {
+    actions.contains(&Action::DropAddresses)
 }
 
 #[test]
@@ -512,6 +522,152 @@ fn the_node_that_owns_the_addresses_takes_the_role_at_once() {
         transitions(&starting),
         vec![(State::Initialize, State::Master, Reason::Started)]
     );
+}
+
+#[test]
+fn taking_the_role_asks_for_the_addresses_and_losing_it_gives_them_back() {
+    let start = Instant::now();
+    let mut node = started(NODE2, 150, true, start);
+
+    let taken = node.tick(start + node.settings().master_down_interval());
+    assert!(takes(&taken), "a master carries the addresses");
+    assert!(!drops(&taken), "and does not drop them in the same breath");
+
+    let given = node.receive(NODE1, &advertisement_from(NODE1, 200), start);
+    assert!(drops(&given), "a backup carries none");
+    assert!(!takes(&given));
+}
+
+#[test]
+fn the_addresses_are_taken_before_the_claim_is_advertised() {
+    // The other way round teaches the segment that this node answers for an
+    // address it does not hold yet, and every frame sent in that window goes
+    // nowhere (T-010).
+    let start = Instant::now();
+    let mut node = started(NODE2, 150, true, start);
+
+    let taken = node.tick(start + node.settings().master_down_interval());
+
+    let take_at = taken
+        .iter()
+        .position(|action| action == &Action::TakeAddresses)
+        .expect("the addresses are taken");
+    let advertise_at = taken
+        .iter()
+        .position(|action| matches!(action, Action::Advertise(_)))
+        .expect("the claim is advertised");
+    assert!(
+        take_at < advertise_at,
+        "the addresses come first: {taken:?}"
+    );
+}
+
+#[test]
+fn starting_asks_for_the_addresses_to_be_dropped_first() {
+    // A killed process leaves its addresses on the interface, so a node that
+    // starts up carrying one holds an address it has no claim to. Nothing
+    // records how far the dead process got, which is why this is asked for
+    // whatever the machine is about to become (T-010).
+    let start = Instant::now();
+    let mut backup = Machine::new(settings(NODE2, 150, true));
+
+    let starting = backup.start(start);
+
+    assert_eq!(
+        starting.first(),
+        Some(&Action::DropAddresses),
+        "before anything else: {starting:?}"
+    );
+
+    // And the owner, which takes the role at once, still clears first.
+    let mut owner = Machine::new(settings(NODE1, 255, true));
+    let starting = owner.start(start);
+    assert_eq!(starting.first(), Some(&Action::DropAddresses));
+    assert!(takes(&starting), "and then takes them for itself");
+    let drop_at = starting
+        .iter()
+        .position(|action| action == &Action::DropAddresses)
+        .expect("it drops");
+    let take_at = starting
+        .iter()
+        .position(|action| action == &Action::TakeAddresses)
+        .expect("it takes");
+    assert!(drop_at < take_at, "clearing comes first: {starting:?}");
+}
+
+#[test]
+fn stopping_gives_the_addresses_back_whatever_the_state_was() {
+    let start = Instant::now();
+    let mut master = started(NODE2, 150, true, start);
+    master.tick(start + master.settings().master_down_interval());
+    assert_eq!(master.state(), State::Master);
+
+    let stopping = master.stop(start);
+    assert!(drops(&stopping), "a node that leaves carries nothing");
+
+    // And a backup, which should be holding none. Asking anyway costs one
+    // refused message nobody reads, and covers a machine whose idea of its
+    // own state is wrong.
+    let mut backup = started(NODE3, 100, true, start);
+    assert!(drops(&backup.stop(start)));
+}
+
+#[test]
+fn a_master_that_cannot_take_the_addresses_stands_down() {
+    // The worst state this product has is a master without its addresses: it
+    // answers nothing, and its advertisements stop every other node from
+    // answering either.
+    let start = Instant::now();
+    let mut node = started(NODE2, 150, true, start);
+    node.tick(start + node.settings().master_down_interval());
+    assert_eq!(node.state(), State::Master);
+
+    let giving_up = node.renounce(start);
+
+    assert_eq!(node.state(), State::Backup);
+    assert_eq!(
+        transitions(&giving_up),
+        vec![(State::Master, State::Backup, Reason::AddressRefused)]
+    );
+    assert!(drops(&giving_up), "and lets go of whatever it did take");
+    assert!(
+        advertisements(&giving_up).is_empty(),
+        "a node standing down over a fault is not advertising"
+    );
+}
+
+#[test]
+fn a_node_that_stood_down_tries_again_one_interval_later() {
+    // The fault may pass. A node that stood down and never tried again would
+    // turn a moment of trouble into a permanent loss of one node.
+    let start = Instant::now();
+    let mut node = started(NODE2, 150, true, start);
+    node.tick(start + node.settings().master_down_interval());
+    node.renounce(start);
+    assert_eq!(node.state(), State::Backup);
+
+    let due = node.settings().master_down_interval();
+    assert!(
+        node.tick(start + due - Duration::from_millis(1)).is_empty(),
+        "not before the interval is over"
+    );
+    let again = node.tick(start + due);
+    assert_eq!(node.state(), State::Master);
+    assert!(takes(&again), "and it asks for the addresses again");
+}
+
+#[test]
+fn a_backup_that_is_told_to_stand_down_does_nothing() {
+    // The other side. A machine that acted on this whatever its state was
+    // would write a transition out of a role it never held.
+    let start = Instant::now();
+    let mut node = started(NODE2, 150, true, start);
+    assert_eq!(node.state(), State::Backup);
+
+    let nothing = node.renounce(start);
+
+    assert!(nothing.is_empty(), "{nothing:?}");
+    assert_eq!(node.state(), State::Backup);
 }
 
 #[test]

@@ -693,6 +693,9 @@ dependencies = [
 [[package]]
 name = "ek-ek-itest"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "ek-ek-log"
@@ -721,6 +724,7 @@ dependencies = [
 name = "ek-ek-vrrp"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "socket2",
 ]
 

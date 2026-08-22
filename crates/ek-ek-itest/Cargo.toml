@@ -13,6 +13,13 @@ description = "Integration test harness for the three node docker cluster"
 # never quietly change what the tests measure (ADR-0014).
 [dependencies]
 
+# Only the measurements use this, never the binaries that run inside a node.
+# A record written to stdout is read by parsing the line, which also measures
+# that it is JSON at all; a substring match would pass against a line nothing
+# can parse (ADR-0037).
+[dev-dependencies]
+serde_json = { workspace = true }
+
 # Runs inside a node container, so it must not pull in anything the harness
 # needs on the host side.
 [[bin]]

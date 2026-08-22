@@ -14,6 +14,9 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::node::{Background, Node};
 
+/// The interface the lab network sits on.
+const LAB: &str = "eth0";
+
 /// A running capture on one node.
 pub struct Capture {
     running: Background,
@@ -30,7 +33,22 @@ impl Capture {
     /// capture stops on its own after `packets` frames or `window`, whichever
     /// comes first, so a test can never leave one behind.
     pub fn start(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
-        Self::run(node, filter, packets, window, false)
+        Self::run(node, LAB, filter, packets, window, false)
+    }
+
+    /// Starts a capture on an interface other than the lab one.
+    ///
+    /// Kept apart from [`Capture::start`] because almost everything is
+    /// measured on the lab network, and naming the interface at every call
+    /// site would say nothing at the ones that use it.
+    pub fn on(
+        node: &Node,
+        interface: &str,
+        filter: &str,
+        packets: usize,
+        window: Duration,
+    ) -> Result<Self> {
+        Self::run(node, interface, filter, packets, window, false)
     }
 
     /// Starts a capture that prints what is inside each packet.
@@ -41,11 +59,12 @@ impl Capture {
     /// detail changes every line, and a measurement that matches on text
     /// should choose which shape it is reading.
     pub fn verbose(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
-        Self::run(node, filter, packets, window, true)
+        Self::run(node, LAB, filter, packets, window, true)
     }
 
     fn run(
         node: &Node,
+        interface: &str,
         filter: &str,
         packets: usize,
         window: Duration,
@@ -53,7 +72,7 @@ impl Capture {
     ) -> Result<Self> {
         let seconds = window.as_secs().max(1).to_string();
         let mut argv = vec![
-            "timeout", &seconds, "tcpdump", "-i", "eth0", "-n", "-l", "-e",
+            "timeout", &seconds, "tcpdump", "-i", interface, "-n", "-l", "-e",
         ];
         if verbose {
             argv.push("-v");

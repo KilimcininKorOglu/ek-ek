@@ -59,6 +59,12 @@ pub enum Reason {
     StrongerPeer,
     /// The machine was stopped on purpose.
     Stopped,
+    /// The addresses could not be taken.
+    ///
+    /// A node that holds the role without holding the addresses answers
+    /// nothing and lets nobody else answer either, which is worse than not
+    /// holding the role at all.
+    AddressRefused,
 }
 
 impl Reason {
@@ -70,6 +76,7 @@ impl Reason {
             Self::NobodyElseAnswered => "nobody_else_answered",
             Self::StrongerPeer => "stronger_peer",
             Self::Stopped => "stopped",
+            Self::AddressRefused => "address_refused",
         }
     }
 }
@@ -95,6 +102,19 @@ pub enum Action {
     Advertise(Advertisement),
     /// Write this state change down.
     Record(Transition),
+    /// Put the virtual addresses on the interface and announce them.
+    ///
+    /// Which addresses, on which interface and behind which prefix is the
+    /// caller's to know. The machine holds the addresses that go in a packet,
+    /// which RFC 5798 keeps to one family, while a node can carry an IPv6
+    /// address alongside them.
+    TakeAddresses,
+    /// Take the virtual addresses off the interface.
+    ///
+    /// Removing one that is not there is not a failure. This is what clears
+    /// an address a killed process left behind, and there is no way to know
+    /// beforehand which of them it got to.
+    DropAddresses,
 }
 
 /// Why an advertisement was not acted on.
@@ -225,16 +245,22 @@ impl Machine {
     /// once. Every other node waits, because nobody is advertising yet and
     /// there is nothing to hear (T-010).
     pub fn start(&mut self, now: Instant) -> Vec<Action> {
+        // Before anything else. A node that was killed left its addresses on
+        // the interface, and starting up while carrying an address this node
+        // has no claim to puts it on two nodes at once (T-010).
+        let mut actions = vec![Action::DropAddresses];
+
         // 255 is the priority RFC 5798 reserves for the node that owns the
         // addresses. Nothing outranks it, so waiting would only delay it.
         if self.settings.priority == u8::MAX {
-            return self.become_master(now, Reason::Started);
+            actions.extend(self.become_master(now, Reason::Started));
+            return actions;
         }
-        let actions = vec![Action::Record(Transition {
+        actions.push(Action::Record(Transition {
             from: self.state,
             to: State::Backup,
             reason: Reason::Started,
-        })];
+        }));
         self.state = State::Backup;
         self.advertise_at = None;
         // Counted from this moment rather than from a packet, because on a
@@ -349,12 +375,32 @@ impl Machine {
         if was == State::Master {
             actions.push(Action::Advertise(self.advertisement(GIVING_UP)));
         }
+        // Whatever the machine thought its state was. A node that is leaving
+        // must carry no virtual address afterwards, and asking to remove one
+        // it never had costs a refused netlink message nobody reads.
+        actions.push(Action::DropAddresses);
         actions.push(Action::Record(Transition {
             from: was,
             to: State::Initialize,
             reason: Reason::Stopped,
         }));
         actions
+    }
+
+    /// Gives the role up because the addresses could not be taken.
+    ///
+    /// A master that holds the role without the addresses is the worst state
+    /// this product has: it answers nothing, and its advertisements stop
+    /// every other node from answering either. Standing down turns a silent
+    /// outage into a takeover.
+    ///
+    /// The node keeps running and its claim timer restarts, so a fault that
+    /// passes is retried one master down interval later.
+    pub fn renounce(&mut self, now: Instant) -> Vec<Action> {
+        if self.state != State::Master {
+            return Vec::new();
+        }
+        self.become_backup(now, Reason::AddressRefused)
     }
 
     /// What a master does with an advertisement it hears.
@@ -417,6 +463,9 @@ impl Machine {
                 to: State::Master,
                 reason,
             }),
+            // Before the advertisement, so the address exists by the time a
+            // peer hears the claim and stops answering for it.
+            Action::TakeAddresses,
             // Sent before the first interval elapses, so the peers learn who
             // holds the role now rather than one interval from now.
             Action::Advertise(self.advertisement(self.settings.priority)),
@@ -429,11 +478,14 @@ impl Machine {
         self.state = State::Backup;
         self.advertise_at = None;
         self.claim_at = Some(now + self.settings.master_down_interval());
-        vec![Action::Record(Transition {
-            from,
-            to: State::Backup,
-            reason,
-        })]
+        vec![
+            Action::Record(Transition {
+                from,
+                to: State::Backup,
+                reason,
+            }),
+            Action::DropAddresses,
+        ]
     }
 
     /// The advertisement this node sends, at the priority given.
