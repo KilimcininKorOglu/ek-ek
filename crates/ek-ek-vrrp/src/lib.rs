@@ -17,3 +17,16 @@
 //!
 //! The advertisement parser reads raw, unauthenticated network data. It must
 //! be covered by fuzz tests.
+
+pub mod header;
+pub mod packet;
+#[cfg(target_os = "linux")]
+pub mod socket;
+pub mod state;
+pub mod transport;
+
+pub use packet::{ADVERTISEMENT, Advertisement, GIVING_UP, Malformed, PROTOCOL, VERSION};
+#[cfg(target_os = "linux")]
+pub use socket::RawSocket;
+pub use state::{Action, Ignored, Machine, Reason, Settings, State, Transition};
+pub use transport::Transport;

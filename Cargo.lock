@@ -720,6 +720,9 @@ dependencies = [
 [[package]]
 name = "ek-ek-vrrp"
 version = "0.1.0"
+dependencies = [
+ "socket2",
+]
 
 [[package]]
 name = "equivalent"

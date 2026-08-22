@@ -8,8 +8,18 @@ authors.workspace = true
 publish = false
 description = "VRRP state machine, VIP management and gratuitous ARP"
 
+[[bin]]
+# Runs one virtual router from its arguments, which is what the two node
+# measurement needs on each side. Never packaged: the product ships `ek-ek`.
+name = "ek-ek-vrrp-node"
+path = "src/bin/ek-ek-vrrp-node.rs"
+
 # Must never depend on ek-ek-dataplane (ADR-0014).
 [dependencies]
+
+# The raw socket only exists on Linux, and so does the capability it needs.
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { workspace = true }
 
 [lints]
 workspace = true

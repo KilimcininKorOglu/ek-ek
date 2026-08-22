@@ -30,20 +30,39 @@ impl Capture {
     /// capture stops on its own after `packets` frames or `window`, whichever
     /// comes first, so a test can never leave one behind.
     pub fn start(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
+        Self::run(node, filter, packets, window, false)
+    }
+
+    /// Starts a capture that prints what is inside each packet.
+    ///
+    /// Some fields only appear when tcpdump is asked to be verbose: the
+    /// addresses a VRRP advertisement carries, and the TTL of the IP header
+    /// that carried it. Kept apart from [`Capture::start`] because the extra
+    /// detail changes every line, and a measurement that matches on text
+    /// should choose which shape it is reading.
+    pub fn verbose(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
+        Self::run(node, filter, packets, window, true)
+    }
+
+    fn run(
+        node: &Node,
+        filter: &str,
+        packets: usize,
+        window: Duration,
+        verbose: bool,
+    ) -> Result<Self> {
         let seconds = window.as_secs().max(1).to_string();
-        let running = node.spawn(&[
-            "timeout",
-            &seconds,
-            "tcpdump",
-            "-i",
-            "eth0",
-            "-n",
-            "-l",
-            "-e",
-            "-c",
-            &packets.to_string(),
-            filter,
-        ])?;
+        let mut argv = vec![
+            "timeout", &seconds, "tcpdump", "-i", "eth0", "-n", "-l", "-e",
+        ];
+        if verbose {
+            argv.push("-v");
+        }
+        let count = packets.to_string();
+        argv.push("-c");
+        argv.push(&count);
+        argv.push(filter);
+        let running = node.spawn(&argv)?;
         running.wait_for_stderr("listening on", Duration::from_secs(10))?;
         Ok(Self {
             running,
