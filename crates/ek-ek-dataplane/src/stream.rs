@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ek_ek_config::Config;
+use ek_ek_config::{Config, ProxyProtocol};
 use pingora::apps::ServerApp;
 use pingora::protocols::Stream;
 use pingora::server::ShutdownWatch;
@@ -36,6 +36,7 @@ use tokio::net::TcpStream;
 
 use crate::balance::Balancer;
 use crate::live::{Live, LiveConfig, Status};
+use crate::proxyproto;
 
 /// How much is moved in one copy step.
 ///
@@ -65,6 +66,8 @@ struct Routed {
     address: SocketAddr,
     connect_timeout: Duration,
     idle_timeout: Option<Duration>,
+    /// Which PROXY header, if any, this backend is told the client with.
+    proxy_protocol: ProxyProtocol,
 }
 
 impl StreamProxy {
@@ -116,6 +119,7 @@ impl StreamProxy {
                 0 => None,
                 seconds => Some(Duration::from_secs(u64::from(seconds))),
             },
+            proxy_protocol: frontend.proxy_protocol,
         })
     }
 }
@@ -232,11 +236,34 @@ enum Moved {
 /// address rather than refused: the connection is real, only its origin is
 /// unreadable, and source hashing simply lands everybody on one member.
 fn client_address(client: &Stream) -> IpAddr {
-    client
-        .get_socket_digest()
-        .and_then(|digest| digest.peer_addr().cloned())
-        .and_then(|address| address.as_inet().map(|inet| inet.ip()))
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    ends(client).map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |(peer, _)| peer.ip())
+}
+
+/// Both ends of an accepted connection, with their ports.
+///
+/// A PROXY header states four things, and the port is two of them: an
+/// Exchange connector matching on address alone still needs the port to tell
+/// two sessions from one host apart in its own log.
+fn ends(client: &Stream) -> Option<(SocketAddr, SocketAddr)> {
+    let digest = client.get_socket_digest()?;
+    let peer = *digest.peer_addr()?.as_inet()?;
+    let local = *digest.local_addr()?.as_inet()?;
+    Some((peer, local))
+}
+
+/// The PROXY header this connection opens with, if any.
+///
+/// A frontend with the protocol turned off sends nothing at all, which is
+/// what keeps a backend that does not expect a header working (ADR-0043).
+fn announce(format: ProxyProtocol, client: &Stream) -> Option<Vec<u8>> {
+    match ends(client) {
+        Some((peer, local)) => proxyproto::header(format, peer, local),
+        // The connection is real and the backend is waiting for a header, so
+        // one is sent saying no address is being stated. Sending nothing
+        // would leave the backend reading the client's first bytes as a
+        // header and refusing the connection.
+        None => proxyproto::unknown(format),
+    }
 }
 
 /// Whether a configuration says this frontend is an L4 listener.
@@ -282,6 +309,21 @@ impl ServerApp for StreamProxy {
         // Small writes go out immediately. A protocol that waits for a short
         // reply, which is most of them, otherwise pays the delay every turn.
         let _ = backend.set_nodelay(true);
+
+        // Written before anything the client sent, and only here, so a
+        // backend reading it as the first bytes of the connection is right to
+        // and reads it exactly once (ADR-0043). On a TLS passthrough frontend
+        // this is also before the ClientHello, which is why the handshake is
+        // unaffected.
+        if let Some(header) = announce(routed.proxy_protocol, &client)
+            && (backend.write_all(&header).await.is_err() || backend.flush().await.is_err())
+        {
+            // The backend went away before the header landed. Nothing of the
+            // client's has been forwarded, so closing here leaves no
+            // half-written session behind.
+            self.status.backend_connect_failed();
+            return None;
+        }
 
         let counted = Counted::open(&self.balancer, &self.frontend, &routed.pool, &routed.member);
         let _ = couple(&mut client, &mut backend, routed.idle_timeout).await;

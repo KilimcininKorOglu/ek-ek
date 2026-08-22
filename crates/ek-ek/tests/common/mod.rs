@@ -374,6 +374,15 @@ pub struct Document {
     pub material: Vec<(String, String, String)>,
     /// Key the stickiness cookie is signed with, as hex.
     pub stickiness_key: String,
+    /// Which PROXY header the frontend opens a backend connection with.
+    ///
+    /// Nothing means the document does not name the setting at all, which is
+    /// how the default is measured rather than assumed.
+    pub proxy_protocol: Option<String>,
+    /// Address the VIP carries, and so the address the frontend listens on.
+    pub vip_address: String,
+    /// Prefix length the VIP is written with.
+    pub prefix_length: u8,
 }
 
 impl Document {
@@ -401,7 +410,35 @@ impl Document {
             certificates: String::new(),
             material: Vec::new(),
             stickiness_key: String::new(),
+            proxy_protocol: Some("disabled".to_owned()),
+            vip_address: "127.0.0.1".to_owned(),
+            prefix_length: 8,
         }
+    }
+
+    /// Turns the PROXY protocol on for the frontend, in the named format.
+    #[must_use]
+    pub fn proxy_protocol(mut self, format: &str) -> Self {
+        self.proxy_protocol = Some(format.to_owned());
+        self
+    }
+
+    /// Leaves the setting out of the document entirely.
+    ///
+    /// A frontend written without it is what an operator who never touched
+    /// the setting has, so this is how the default is measured.
+    #[must_use]
+    pub fn without_proxy_protocol_named(mut self) -> Self {
+        self.proxy_protocol = None;
+        self
+    }
+
+    /// Puts the VIP, and so the listener, on this address.
+    #[must_use]
+    pub fn on_address(mut self, address: &str, prefix_length: u8) -> Self {
+        self.vip_address = address.to_owned();
+        self.prefix_length = prefix_length;
+        self
     }
 
     /// Turns cookie stickiness on for the pool.
@@ -631,13 +668,21 @@ impl Document {
         format!(
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
-"vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
+"vips":[{{"id":"vip-web","address":"{vip_address}","prefix_length":{prefix_length},"interface":"lo","preferred_node":"node1"}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
 "stickiness_key":"{stickiness_key}"}}"#,
             port = self.port,
+            vip_address = self.vip_address,
+            prefix_length = self.prefix_length,
+            proxy_protocol = self
+                .proxy_protocol
+                .as_ref()
+                .map_or_else(String::new, |format| {
+                    format!(r#""proxy_protocol":"{format}","#)
+                }),
             application = self.application,
             transport = self.transport,
             udp_limit = self.udp_session_limit,
@@ -1299,6 +1344,8 @@ pub struct Running {
     pub agent: Agent,
     /// The port the frontend listens on.
     pub port: u16,
+    /// The address the frontend listens on, which is the VIP's.
+    pub address: String,
     data_plane: DataPlane,
     directory: tempfile::TempDir,
     /// Held for as long as the binary runs, so only a few run at once.
@@ -1320,6 +1367,7 @@ impl Running {
         let mut running = Self {
             agent,
             port: document.port,
+            address: document.vip_address.clone(),
             data_plane,
             directory,
             _slot: slot,
@@ -1333,7 +1381,7 @@ impl Running {
     async fn wait_until_listening(&mut self) {
         let start = tokio::time::Instant::now();
         loop {
-            if let Ok(stream) = TcpStream::connect(("127.0.0.1", self.port)).await {
+            if let Ok(stream) = TcpStream::connect((self.address.as_str(), self.port)).await {
                 drop(stream);
                 return;
             }
@@ -1412,6 +1460,7 @@ impl Running {
         let mut running = Self {
             agent,
             port: document.port,
+            address: document.vip_address.clone(),
             data_plane,
             directory,
             _slot: slot,
@@ -1470,14 +1519,22 @@ impl Running {
 
 /// Connects once the binary is listening.
 pub async fn connect(port: u16) -> TcpStream {
+    connect_to("127.0.0.1", port).await
+}
+
+/// Connects to a named address once the binary is listening there.
+///
+/// Kept apart from `connect` so a test on an IPv6 listener reaches it over
+/// IPv6 rather than over a loopback that happens to answer both.
+pub async fn connect_to(address: &str, port: u16) -> TcpStream {
     let start = tokio::time::Instant::now();
     loop {
-        if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)).await {
+        if let Ok(stream) = TcpStream::connect((address, port)).await {
             return stream;
         }
         assert!(
             start.elapsed() <= STARTUP_PATIENCE,
-            "the traffic path never started listening on port {port}"
+            "the traffic path never started listening on {address} port {port}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
