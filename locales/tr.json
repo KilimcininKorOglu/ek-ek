@@ -10,6 +10,7 @@
   "config.frontend.unknown_backend": "'{frontend}' frontend'i tanımlı olmayan '{backend}' backend'ini gösteriyor.",
   "config.frontend.unknown_certificate": "'{frontend}' frontend'i tanımlı olmayan '{certificate}' sertifikasını gösteriyor.",
   "config.frontend.unknown_default_certificate": "'{frontend}' frontend'inin varsayılan sertifikası '{certificate}', o frontend'in sunduğu sertifikalar arasında değil.",
+  "config.frontend.unreachable_routing_rule": "'{frontend}' frontend'inde {rule} numaralı yönlendirme kuralına hiç istek düşmez, çünkü {earlier} numaralı kural aynı isteklerin tamamını zaten alıyor.",
   "config.frontend.unknown_vip": "'{frontend}' frontend'i tanımlı olmayan '{vip}' VIP'ini gösteriyor.",
   "config.health_check.timeout_above_interval": "'{backend}' backend havuzunun sağlık kontrolü zaman aşımı ({timeout_ms} ms), kontrol aralığından ({interval_ms} ms) uzun.",
   "config.port.out_of_range": "{port} geçerli bir port numarası değil.",

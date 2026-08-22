@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::SessionStickiness;
 use crate::certificate::CertificateSource;
 use crate::config::Config;
-use crate::frontend::{ApplicationProtocol, RuleAction, TransportProtocol};
+use crate::frontend::{ApplicationProtocol, RoutingRule, RuleAction, TransportProtocol};
 use crate::id::{BackendId, CertificateId, DnsProviderId, NodeId, VipId};
 
 /// A stable identifier for one kind of validation failure.
@@ -863,4 +863,157 @@ fn reaches(frontend: &crate::frontend::Frontend, backend: &BackendId) -> bool {
             .sni_rules
             .iter()
             .any(|rule| &rule.backend == backend)
+}
+
+/// What a configuration warning is about.
+///
+/// Separate from `ErrorCode` so the two can never be confused: an error stops
+/// a configuration from being accepted, a warning never does (ADR-0072).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarningCode {
+    /// A routing rule can never match, because an earlier rule already takes
+    /// every request it would take.
+    #[serde(rename = "config.frontend.unreachable_routing_rule")]
+    FrontendUnreachableRoutingRule,
+}
+
+impl WarningCode {
+    /// Every code, so a test can check the whole set at once.
+    pub const ALL: [Self; 1] = [Self::FrontendUnreachableRoutingRule];
+
+    /// Returns the translation key this code is looked up under.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::FrontendUnreachableRoutingRule => "config.frontend.unreachable_routing_rule",
+        }
+    }
+}
+
+/// Something worth telling an operator that is not an error.
+///
+/// Carries no sentence, for the same reason `ValidationError` carries none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationWarning {
+    /// What is worth mentioning.
+    pub code: WarningCode,
+    /// Which field it is about.
+    pub path: FieldPath,
+    /// Values the translated sentence needs, keyed by stable names.
+    pub parameters: BTreeMap<String, ParameterValue>,
+}
+
+impl ValidationWarning {
+    fn new(code: WarningCode, path: FieldPath) -> Self {
+        Self {
+            code,
+            path,
+            parameters: BTreeMap::new(),
+        }
+    }
+
+    fn with_id(mut self, name: &str, value: &str) -> Self {
+        self.parameters.insert(
+            name.to_owned(),
+            ParameterValue::Identifier(value.to_owned()),
+        );
+        self
+    }
+
+    fn with_number(mut self, name: &str, value: i64) -> Self {
+        self.parameters
+            .insert(name.to_owned(), ParameterValue::Number(value));
+        self
+    }
+}
+
+/// Looks for configurations that are valid but probably not what was meant.
+///
+/// Nothing here refuses a configuration. A caller that accepts configuration
+/// shows these to the operator; the traffic path does not call this at all,
+/// because a warning never stops a delivery (ADR-0072).
+#[must_use]
+pub fn inspect(config: &Config) -> Vec<ValidationWarning> {
+    let mut warnings = Vec::new();
+    check_unreachable_rules(config, &mut warnings);
+    warnings
+}
+
+/// Reports a routing rule an earlier rule already takes every request from.
+fn check_unreachable_rules(config: &Config, warnings: &mut Vec<ValidationWarning>) {
+    for (at, frontend) in config.frontends.iter().enumerate() {
+        for (later, rule) in frontend.routing_rules.iter().enumerate() {
+            let Some(earlier) = frontend.routing_rules[..later]
+                .iter()
+                .position(|before| covers(before, rule))
+            else {
+                continue;
+            };
+
+            warnings.push(
+                ValidationWarning::new(
+                    WarningCode::FrontendUnreachableRoutingRule,
+                    FieldPath::root()
+                        .field("frontends")
+                        .index(at)
+                        .field("routing_rules")
+                        .index(later),
+                )
+                .with_id("frontend", frontend.id.as_str())
+                .with_number("rule", i64::try_from(later).unwrap_or(i64::MAX))
+                .with_number("earlier", i64::try_from(earlier).unwrap_or(i64::MAX)),
+            );
+        }
+    }
+}
+
+/// Whether every request `later` would take is already taken by `earlier`.
+fn covers(earlier: &RoutingRule, later: &RoutingRule) -> bool {
+    host_covers(
+        earlier.host_pattern.as_deref(),
+        later.host_pattern.as_deref(),
+    ) && path_covers(earlier.path_prefix.as_deref(), later.path_prefix.as_deref())
+}
+
+/// Whether one host pattern takes every host another would take.
+fn host_covers(earlier: Option<&str>, later: Option<&str>) -> bool {
+    let Some(earlier) = earlier else {
+        // No pattern takes every host, so it covers anything.
+        return true;
+    };
+    let Some(later) = later else {
+        // A pattern cannot cover "every host".
+        return false;
+    };
+
+    let earlier = earlier.to_lowercase();
+    let later = later.to_lowercase();
+    if earlier == later {
+        return true;
+    }
+    // `*.ornek.com` covers `posta.ornek.com` and nothing deeper (ADR-0071).
+    earlier.strip_prefix("*.").is_some_and(|suffix| {
+        later
+            .split_once('.')
+            .is_some_and(|(_, rest)| rest == suffix)
+    })
+}
+
+/// Whether one path prefix takes every path another would take.
+fn path_covers(earlier: Option<&str>, later: Option<&str>) -> bool {
+    let Some(earlier) = earlier else {
+        return true;
+    };
+    let Some(later) = later else {
+        return false;
+    };
+    // Compared case insensitively, which is the wider of the two matching
+    // modes: a rule that would shadow under the wider one is worth naming.
+    let earlier = earlier.to_lowercase();
+    let later = later.to_lowercase();
+    later == earlier
+        || later
+            .strip_prefix(&earlier)
+            .is_some_and(|rest| earlier.ends_with('/') || rest.starts_with('/'))
 }

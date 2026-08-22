@@ -357,6 +357,8 @@ pub struct Document {
     pub health_check: String,
     /// Rules, already rendered.
     pub routing_rules: Vec<String>,
+    /// Extra backend pools beyond `web`, already rendered.
+    pub extra_pools: Vec<String>,
     /// Pool used when no rule matches, or nothing.
     pub default_backend: String,
     /// The pool's stickiness, already rendered.
@@ -392,6 +394,7 @@ impl Document {
             idle_timeout_seconds: 0,
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
+            extra_pools: Vec::new(),
             default_backend: r#""web""#.to_owned(),
             stickiness: r#"{"mode":"disabled"}"#.to_owned(),
             tls: "null".to_owned(),
@@ -476,6 +479,53 @@ impl Document {
         self.tls = format!(
             r#"{{"certificates":[{listed}],"default_certificate":{default},"policy":"dengeli"}}"#
         );
+        self
+    }
+
+    /// Adds a backend pool beyond the default `web` one.
+    #[must_use]
+    pub fn pool(mut self, id: &str, members: Vec<String>) -> Self {
+        self.extra_pools.push(format!(
+            r#"{{"id":"{id}","members":[{}],"algorithm":"round_robin","health_check":null,"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}"#,
+            members.join(",")
+        ));
+        self
+    }
+
+    /// Adds a routing rule to the end of the list.
+    ///
+    /// `host` and `path` are each optional, and a rule naming neither takes
+    /// every request. `seconds` overrides the frontend's request limit.
+    #[must_use]
+    pub fn rule(
+        mut self,
+        host: Option<&str>,
+        path: Option<&str>,
+        backend: &str,
+        seconds: Option<u32>,
+    ) -> Self {
+        self.routing_rules.push(format!(
+            r#"{{"host_pattern":{},"path_prefix":{},"path_case":"insensitive","action":{{"type":"proxy","backend":"{backend}"}},"request_timeout_seconds":{}}}"#,
+            quoted_or_null(host),
+            quoted_or_null(path),
+            seconds.map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        ));
+        self
+    }
+
+    /// Adds a routing rule that matches its path case sensitively.
+    #[must_use]
+    pub fn case_sensitive_rule(mut self, path: &str, backend: &str) -> Self {
+        self.routing_rules.push(format!(
+            r#"{{"host_pattern":null,"path_prefix":"{path}","path_case":"sensitive","action":{{"type":"proxy","backend":"{backend}"}},"request_timeout_seconds":null}}"#
+        ));
+        self
+    }
+
+    /// Drops the default pool, so a request no rule takes has nowhere to go.
+    #[must_use]
+    pub fn without_default_backend(mut self) -> Self {
+        self.default_backend = "null".to_owned();
         self
     }
 
@@ -583,7 +633,7 @@ impl Document {
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"127.0.0.1","prefix_length":8,"interface":"lo","preferred_node":"node1"}}],
 "frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},"proxy_protocol":"disabled","routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
-"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}],
+"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
 "stickiness_key":"{stickiness_key}"}}"#,
@@ -594,6 +644,11 @@ impl Document {
             drain = self.drain_timeout_seconds,
             idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
+            extra_pools = self
+                .extra_pools
+                .iter()
+                .map(|pool| format!(",{pool}"))
+                .collect::<String>(),
             default_backend = self.default_backend,
             http2 = self.http2,
             connect = self.connect_timeout_seconds,
@@ -1582,6 +1637,17 @@ async fn read_answer(io: &mut BufReader<TcpStream>) -> std::io::Result<Answer> {
         headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
+}
+
+/// Renders an optional string as a JSON string or `null`.
+fn quoted_or_null(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".to_owned(), |text| format!("\"{text}\""))
+}
+
+/// A request naming a host and a path of its own.
+#[must_use]
+pub fn request_to(host: &str, path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n")
 }
 
 /// A plain request a keep-alive connection can carry.

@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use ek_ek_config::i18n::EMBEDDED;
-use ek_ek_config::validation::{ErrorCode, FieldPath, ParameterValue, ValidationError};
+use ek_ek_config::validation::{
+    ErrorCode, FieldPath, ParameterValue, ValidationError, WarningCode,
+};
 use ek_ek_config::{Catalog, DialogKeys};
 
 /// The languages that ship. A third one is added by adding a file, so this is
@@ -480,6 +482,25 @@ fn every_error_code_has_a_text_in_every_language() {
     let catalog = catalog();
 
     for code in ErrorCode::ALL {
+        for language in SHIPPED {
+            let text = catalog.text(language, code.key());
+            assert_ne!(
+                text,
+                code.key(),
+                "{language}: the validation layer can produce {} and nothing translates it",
+                code.key()
+            );
+        }
+    }
+}
+
+#[test]
+fn every_warning_code_has_a_text_in_every_language() {
+    // The same guarantee as for errors. A warning nobody translated renders
+    // as its own key, which reads like a deliberate identifier (ADR-0072).
+    let catalog = catalog();
+
+    for code in WarningCode::ALL {
         for language in SHIPPED {
             let text = catalog.text(language, code.key());
             assert_ne!(

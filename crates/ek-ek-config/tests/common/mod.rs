@@ -14,8 +14,8 @@ use ek_ek_config::{
     AdminState, ApplicationProtocol, Backend, BackendId, BackendMember, Certificate, CertificateId,
     CertificateSource, CertificateValidity, Config, ConnectionPooling, DnsProvider,
     DnsProviderConnection, DnsProviderId, DnsRecordType, Frontend, FrontendId, HealthCheck,
-    HealthProbe, Http2, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, ProbePayload,
-    ProxyProtocol, RoutingRule, RuleAction, SameSitePolicy, SchemaVersion, SecretId,
+    HealthProbe, Http2, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, PathCase,
+    ProbePayload, ProxyProtocol, RoutingRule, RuleAction, SameSitePolicy, SchemaVersion, SecretId,
     SessionStickiness, SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol, TsigAlgorithm, Vip,
     VipId,
 };
@@ -112,6 +112,7 @@ pub fn http_frontend() -> Frontend {
             RoutingRule {
                 host_pattern: Some("mail.example.org".to_owned()),
                 path_prefix: Some("/Microsoft-Server-ActiveSync".to_owned()),
+                path_case: PathCase::Insensitive,
                 action: RuleAction::Proxy {
                     backend: BackendId::new("web"),
                 },
@@ -120,6 +121,7 @@ pub fn http_frontend() -> Frontend {
             RoutingRule {
                 host_pattern: Some("mail.example.org".to_owned()),
                 path_prefix: Some("/owa".to_owned()),
+                path_case: PathCase::Insensitive,
                 action: RuleAction::Proxy {
                     backend: BackendId::new("web"),
                 },
@@ -128,6 +130,7 @@ pub fn http_frontend() -> Frontend {
             RoutingRule {
                 host_pattern: None,
                 path_prefix: Some("/api".to_owned()),
+                path_case: PathCase::Insensitive,
                 action: RuleAction::Proxy {
                     backend: BackendId::new("web"),
                 },

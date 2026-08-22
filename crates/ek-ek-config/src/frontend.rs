@@ -126,6 +126,21 @@ pub enum ApplicationProtocol {
     Raw,
 }
 
+/// Whether a path prefix is matched case sensitively (ADR-0071).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathCase {
+    /// `/owa` also covers `/OWA`. This is the default, because IIS serves
+    /// paths case insensitively and a client asking for `/OWA` really does
+    /// reach OWA; matching case sensitively would drop it to the default
+    /// pool instead.
+    #[default]
+    Insensitive,
+    /// `/owa` covers only `/owa`, which is what RFC 3986 says and what a
+    /// backend serving paths case sensitively needs.
+    Sensitive,
+}
+
 /// TLS termination settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -214,7 +229,13 @@ pub struct RoutingRule {
     pub host_pattern: Option<String>,
     /// Path the request must start with, matched after normalisation so that
     /// `/owa/../admin` cannot slip past an `/owa` rule.
+    ///
+    /// The prefix matches on a component boundary: `/owa` covers `/owa` and
+    /// `/owa/auth` but not `/owanot` (ADR-0071).
     pub path_prefix: Option<String>,
+    /// Whether `path_prefix` is matched case sensitively.
+    #[serde(default)]
+    pub path_case: PathCase,
     /// What happens to a request this rule matches.
     pub action: RuleAction,
     /// Time a matching request may take, in seconds.

@@ -760,6 +760,7 @@ fn build_website(
                 // Matches everything, which is what a redirect listener is.
                 host_pattern: None,
                 path_prefix: None,
+                path_case: crate::frontend::PathCase::Insensitive,
                 action: RuleAction::Redirect {
                     // 308 rather than 301: a browser following a 301 turns a
                     // POST into a GET and drops the body.
@@ -898,6 +899,7 @@ fn build_exchange(
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/Microsoft-Server-ActiveSync".to_owned()),
+            path_case: crate::frontend::PathCase::Insensitive,
             action: RuleAction::Proxy {
                 backend: activesync,
             },
@@ -908,18 +910,21 @@ fn build_exchange(
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/mapi".to_owned()),
+            path_case: crate::frontend::PathCase::Insensitive,
             action: RuleAction::Proxy { backend: mapi },
             request_timeout_seconds: Some(3_600),
         },
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/ews".to_owned()),
+            path_case: crate::frontend::PathCase::Insensitive,
             action: RuleAction::Proxy { backend: ews },
             request_timeout_seconds: Some(600),
         },
         RoutingRule {
             host_pattern: None,
             path_prefix: Some("/owa".to_owned()),
+            path_case: crate::frontend::PathCase::Insensitive,
             action: RuleAction::Proxy {
                 backend: owa.clone(),
             },

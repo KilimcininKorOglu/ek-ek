@@ -13,7 +13,7 @@ mod common;
 
 use common::sample;
 use ek_ek_config::{
-    ApplicationProtocol, BackendId, CertificateId, ErrorCode, ParameterValue, RuleAction,
+    ApplicationProtocol, BackendId, CertificateId, ErrorCode, ParameterValue, PathCase, RuleAction,
     SameSitePolicy, SessionStickiness, TransportProtocol, ValidationErrors, VipId, validate,
     validate_vip_removal,
 };
@@ -477,6 +477,7 @@ fn the_udp_rule_looks_past_the_default_backend() {
         .push(ek_ek_config::RoutingRule {
             host_pattern: None,
             path_prefix: None,
+            path_case: PathCase::Insensitive,
             action: RuleAction::Proxy {
                 backend: BackendId::new("dns"),
             },

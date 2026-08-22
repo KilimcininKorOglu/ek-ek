@@ -53,8 +53,8 @@ pub use certificate::{
 };
 pub use config::{Config, SchemaVersion};
 pub use frontend::{
-    ApplicationProtocol, Frontend, Http2, ProxyProtocol, RedirectStatus, RoutingRule, RuleAction,
-    SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol,
+    ApplicationProtocol, Frontend, Http2, PathCase, ProxyProtocol, RedirectStatus, RoutingRule,
+    RuleAction, SniRule, TlsPolicyLevel, TlsSettings, TransportProtocol,
 };
 pub use health::{DnsRecordType, HealthCheck, HealthProbe, ProbePayload};
 pub use i18n::{Catalog, Dialog, DialogKeys};
@@ -68,7 +68,7 @@ pub use template::{
     UserTemplate, Verification, apply, embedded, embedded_by_id, from_frontend, undo,
 };
 pub use validation::{
-    ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors, validate,
-    validate_vip_removal,
+    ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors,
+    ValidationWarning, WarningCode, inspect, validate, validate_vip_removal,
 };
 pub use vip::Vip;

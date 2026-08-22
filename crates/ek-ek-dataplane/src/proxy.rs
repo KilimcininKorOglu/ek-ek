@@ -20,9 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ek_ek_config::{
-    ApplicationProtocol, Backend, ConnectionPooling, Frontend, RoutingRule, RuleAction,
-};
+use ek_ek_config::{ApplicationProtocol, Backend, ConnectionPooling, Frontend};
 use pingora::http::ResponseHeader;
 use pingora::prelude::HttpPeer;
 use pingora::proxy::{ProxyHttp, Session};
@@ -30,6 +28,7 @@ use pingora::upstreams::peer::Peer;
 use pingora::{Error, ErrorType};
 
 use crate::live::{Live, LiveConfig, Status};
+use crate::route::{Decision, decide};
 use crate::sticky::{self, Signer};
 
 /// Header carrying the client address to the backend.
@@ -108,43 +107,40 @@ impl Proxy {
     }
 }
 
-/// Which pool a request goes to.
+/// Builds the upstream peer a request is sent to.
 ///
-/// Host and path matching arrives with T-070. Until then a rule that matches
-/// everything is honoured, which is what a redirect listener is made of
-/// (ADR-0057), and everything else falls through to the default pool.
-fn decide<'a>(frontend: &'a Frontend) -> Decision<'a> {
-    for rule in &frontend.routing_rules {
-        if !matches_everything(rule) {
-            continue;
-        }
-        return match &rule.action {
-            RuleAction::Proxy { backend } => Decision::Pool(backend.as_str()),
-            RuleAction::Redirect { status } => Decision::Redirect(status.code()),
-        };
+/// Written out here rather than inline so the numbers a configuration names
+/// can be read back without holding a request open for as long as they
+/// allow: an ActiveSync push asks for an hour, and no test waits that long.
+///
+/// Returns nothing when the peer refuses its own options, which cannot happen
+/// for a peer built a line earlier.
+#[must_use]
+pub fn upstream(
+    address: SocketAddr,
+    connect_timeout_seconds: u32,
+    request_timeout_seconds: u32,
+    pooling: ConnectionPooling,
+) -> Option<HttpPeer> {
+    // TLS to the backend arrives with M4. Until then the hop is plain and
+    // the SNI is empty rather than guessed.
+    let mut peer = HttpPeer::new(address, false, String::new());
+    let options = peer.get_mut_peer_options()?;
+
+    options.connection_timeout = Some(Duration::from_secs(u64::from(connect_timeout_seconds)));
+    // Zero means no limit, which is what an ActiveSync or IMAP IDLE request
+    // needs (ADR-0058). The value comes from the rule that took the request,
+    // falling back to the frontend's own (ADR-0071).
+    if request_timeout_seconds > 0 {
+        options.read_timeout = Some(Duration::from_secs(u64::from(request_timeout_seconds)));
+    }
+    if pooling == ConnectionPooling::Disabled {
+        // NTLM binds authentication to the connection, so reuse would hand
+        // one client's authenticated connection to another (ADR-0045).
+        options.idle_timeout = Some(Duration::ZERO);
     }
 
-    frontend
-        .default_backend
-        .as_ref()
-        .map_or(Decision::Nowhere, |backend| {
-            Decision::Pool(backend.as_str())
-        })
-}
-
-/// Whether a rule takes every request.
-fn matches_everything(rule: &RoutingRule) -> bool {
-    rule.host_pattern.is_none() && rule.path_prefix.is_none()
-}
-
-/// What is done with a request.
-enum Decision<'a> {
-    /// Forward it to this pool.
-    Pool(&'a str),
-    /// Answer it with this redirect status.
-    Redirect(u16),
-    /// Nowhere to send it.
-    Nowhere,
+    Some(peer)
 }
 
 /// Finds a pool by identity.
@@ -260,7 +256,17 @@ impl ProxyHttp for Proxy {
             return Ok(true);
         }
 
-        let name = match decide(frontend) {
+        // Read from the request rather than carried in, so a rule sees the
+        // same host and path the client actually sent.
+        let asked_for = session
+            .req_header()
+            .headers
+            .get(http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let path = session.req_header().uri.path().to_owned();
+
+        let (name, request_limit) = match decide(frontend, asked_for.as_deref(), &path) {
             Decision::Redirect(code) => {
                 // No backend is contacted, so no plaintext request ever
                 // leaves this process (ADR-0057).
@@ -276,7 +282,10 @@ impl ProxyHttp for Proxy {
                 }
                 return Ok(true);
             }
-            Decision::Pool(name) => name,
+            Decision::Pool {
+                name,
+                request_timeout_seconds,
+            } => (name, request_timeout_seconds),
         };
 
         let Some(pool) = pool(&live, name) else {
@@ -335,27 +344,13 @@ impl ProxyHttp for Proxy {
         ctx.chosen = Some((name.to_owned(), member.id.as_str().to_owned()));
 
         let address = SocketAddr::new(member.address, member.port);
-        // TLS to the backend arrives with M4. Until then the hop is plain and
-        // the SNI is empty rather than guessed.
-        let mut peer = HttpPeer::new(address, false, String::new());
-        let options = peer.get_mut_peer_options().ok_or_else(|| {
-            Error::explain(ErrorType::InternalError, "peer has no options to set")
-        })?;
-        options.connection_timeout = Some(Duration::from_secs(u64::from(
+        let peer = upstream(
+            address,
             frontend.connect_timeout_seconds,
-        )));
-        // Zero means no limit, which is what an ActiveSync or IMAP IDLE
-        // request needs (ADR-0058).
-        let request_limit = frontend.request_timeout_seconds;
-        if request_limit > 0 {
-            options.read_timeout = Some(Duration::from_secs(u64::from(request_limit)));
-        }
-        if pool.connection_pooling == ConnectionPooling::Disabled {
-            // NTLM binds authentication to the connection, so reuse would
-            // hand one client's authenticated connection to another
-            // (ADR-0045).
-            options.idle_timeout = Some(Duration::ZERO);
-        }
+            request_limit,
+            pool.connection_pooling,
+        )
+        .ok_or_else(|| Error::explain(ErrorType::InternalError, "peer has no options to set"))?;
 
         ctx.peer = Some(Box::new(peer));
         Ok(false)
