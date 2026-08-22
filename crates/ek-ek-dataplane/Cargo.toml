@@ -15,7 +15,9 @@ async-trait = { workspace = true }
 http = { workspace = true }
 ek-ek-config = { workspace = true }
 ek-ek-ipc = { workspace = true }
+ek-ek-log = { workspace = true }
 hmac = { workspace = true }
+log = { workspace = true }
 pingora = { workspace = true }
 sha2 = { workspace = true }
 socket2 = { workspace = true }

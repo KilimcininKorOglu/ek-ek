@@ -27,6 +27,12 @@ todo = "warn"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The logging facade pingora already writes through, so one installed logger
+# captures its records as well as ours (ADR-0037).
+log = "0.4"
+# Timestamps only. Already in the tree through pingora, so this adds no new
+# supply chain surface.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # SQLite is bundled rather than linked against a system library, so a package
 # cannot land on a host whose libsqlite3 is too old for the schema.
@@ -71,5 +77,6 @@ ek-ek-api = { path = "crates/ek-ek-api" }
 ek-ek-config = { path = "crates/ek-ek-config" }
 ek-ek-dataplane = { path = "crates/ek-ek-dataplane" }
 ek-ek-ipc = { path = "crates/ek-ek-ipc" }
+ek-ek-log = { path = "crates/ek-ek-log" }
 ek-ek-store = { path = "crates/ek-ek-store" }
 ek-ek-vrrp = { path = "crates/ek-ek-vrrp" }

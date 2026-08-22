@@ -59,6 +59,15 @@ fn main() -> ExitCode {
 /// process serving nothing looks exactly like a node that was never
 /// configured, which is the one failure an operator must not have to guess at.
 fn run_data_plane(args: &DataPlaneArgs) -> ExitCode {
+    // Installed before anything else, so a failure while collecting the first
+    // configuration is a log record rather than a line nobody structured.
+    // The level comes from the configuration and is applied when it arrives
+    // (ADR-0037).
+    if let Err(error) = ek_ek_log::install(ek_ek_log::Level::default()) {
+        eprintln!("data-plane: the logger could not be installed: {error}");
+        return ExitCode::FAILURE;
+    }
+
     let link = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

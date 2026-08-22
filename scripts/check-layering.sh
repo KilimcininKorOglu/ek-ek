@@ -35,6 +35,10 @@ RULES = [
 # change in the product quietly change what the tests measure (ADR-0055).
 ISOLATED = [
     ("ek-ek-itest", "the integration harness observes the product from outside"),
+    # Both node-agent and data-plane log, so the logging layer sits below both.
+    # Depending on the config model would drag the whole model into a crate
+    # that only has to write lines (ADR-0037).
+    ("ek-ek-log", "the logging layer sits below every crate that logs"),
 ]
 
 raw = subprocess.run(

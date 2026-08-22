@@ -15,11 +15,15 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 ek-ek-dataplane = { workspace = true }
+ek-ek-log = { workspace = true }
 ek-ek-ipc = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
 h2 = { workspace = true }
+# The harness reads the log the way a collector would: as JSON off the bytes
+# the process wrote, never as a value one of our own functions returned.
+serde_json = { workspace = true }
 http = { workspace = true }
 openssl = { workspace = true }
 tempfile = { workspace = true }

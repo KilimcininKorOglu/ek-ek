@@ -344,7 +344,7 @@ impl pingora::services::background::BackgroundService for UdpService {
         // Saying so beats a process that looks healthy and silently drops a
         // service.
         if let Err(error) = outcome {
-            eprintln!("udp frontend could not run: {error}");
+            log::error!("udp frontend could not run: {error}");
         }
 
         if drained && self.draining.finished() {

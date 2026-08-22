@@ -1,0 +1,26 @@
+[package]
+name = "ek-ek-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
+description = "Structured JSON logging and the access log, shared by every process"
+
+# Depends on no workspace crate on purpose. Both node-agent and data-plane log,
+# so this sits below both; a dependency on the config model would drag the whole
+# model into a crate that only has to write lines (ADR-0014).
+[dependencies]
+# The facade pingora already writes its own records through, so installing a
+# logger here captures them without a bridge.
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
