@@ -19,5 +19,11 @@ description = "Integration test harness for the three node docker cluster"
 name = "ek-ek-loadgen"
 path = "src/bin/ek-ek-loadgen.rs"
 
+# Stands in for node-agent, which is not written yet, so a test can run the
+# real traffic path inside a node container.
+[[bin]]
+name = "ek-ek-standin-agent"
+path = "src/bin/ek-ek-standin-agent.rs"
+
 [lints]
 workspace = true

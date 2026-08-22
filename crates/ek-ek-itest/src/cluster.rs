@@ -16,6 +16,12 @@ pub const VIP_RANGE: (u8, u8) = (100, 110);
 
 const NODES: [(&str, u8); 3] = [("node1", 11), ("node2", 12), ("node3", 13)];
 const BACKENDS: [(&str, u8); 2] = [("backend1", 21), ("backend2", 22)];
+/// The real SMTP server the PROXY protocol measurements run against.
+const MAIL: (&str, u8) = ("mail", 23);
+/// Port on the mail server that expects a PROXY header.
+pub const MAIL_PROXIED_PORT: u16 = 25;
+/// Port on the mail server that knows nothing about the header.
+pub const MAIL_PLAIN_PORT: u16 = 26;
 const BUILDER: &str = "builder";
 const BUILDERS: usize = 1;
 const LAB_PREFIX: [u8; 3] = [172, 28, 0];
@@ -68,8 +74,8 @@ impl Cluster {
     pub fn is_up() -> Result<bool> {
         let listed = compose_output(&["ps", "--status", "running", "--format", "{{.Name}}"])?;
         let running = listed.lines().filter(|l| !l.trim().is_empty()).count();
-        // Three nodes, two backends and the builder.
-        let expected = NODES.len() + BACKENDS.len() + BUILDERS;
+        // Three nodes, two backends, the mail server and the builder.
+        let expected = NODES.len() + BACKENDS.len() + BUILDERS + 1;
         Ok(running >= expected)
     }
 
@@ -93,6 +99,19 @@ impl Cluster {
             .find(|(service, _)| *service == name)
             .map(|(_, host)| lab_address(*host))
             .ok_or_else(|| Error::new(format!("no backend named {name}")))
+    }
+
+    /// Address of the real SMTP server on the lab network.
+    pub fn mail_address(&self) -> Ipv4Addr {
+        lab_address(MAIL.1)
+    }
+
+    /// Everything the mail server has logged, newest lines last.
+    ///
+    /// Postfix names the client of every session on its connect line, which is
+    /// the only reading of a PROXY header that comes from outside this project.
+    pub fn mail_log(&self, lines: usize) -> Result<String> {
+        compose_output(&["logs", "--tail", &lines.to_string(), MAIL.0])
     }
 
     /// An address from the reserved VIP range.

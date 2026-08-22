@@ -22,7 +22,7 @@ mod load;
 mod node;
 
 pub use capture::{Capture, CaptureResult};
-pub use cluster::{Cluster, VIP_RANGE};
+pub use cluster::{Cluster, MAIL_PLAIN_PORT, MAIL_PROXIED_PORT, VIP_RANGE};
 pub use error::{Error, Result};
 pub use load::LoadReport;
 pub use node::{Background, Node, Output};

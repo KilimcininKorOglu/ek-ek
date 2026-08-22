@@ -89,6 +89,10 @@ services:
       - ../Cargo.lock:/src/Cargo.lock:ro
       - ../rust-toolchain.toml:/src/rust-toolchain.toml:ro
       - ../crates:/src/crates:ro
+      # The configuration crate embeds every translation file at build time
+      # (ADR-0015), so without this its build script finds no directory and
+      # nothing that depends on it compiles here at all.
+      - ../locales:/src/locales:ro
       - ../docker-data/builder-cargo:/cargo
       - ../docker-data/builder-target:/target
     networks:
@@ -116,6 +120,23 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.22
+
+  # A real SMTP server, for measuring that the PROXY header the product writes
+  # is accepted by software nobody here wrote and that the address it reads out
+  # of it is the client's (ADR-0043). Port 25 expects the header, port 26 does
+  # not, so one container covers both a configured and an unconfigured backend.
+  mail:
+    build:
+      context: .
+      dockerfile: Dockerfile.mail
+    image: ek-ek-mail:latest
+    container_name: ek-ek-mail
+    hostname: mail
+    restart: "no"
+    init: true
+    networks:
+      lab:
+        ipv4_address: 172.28.0.23
 
 networks:
   lab:

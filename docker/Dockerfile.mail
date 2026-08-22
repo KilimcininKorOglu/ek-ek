@@ -1,0 +1,24 @@
+# A real SMTP server for the PROXY protocol tests.
+#
+# Postfix rather than a stand-in written here: the point of the measurement is
+# that the bytes the product produces are accepted by software nobody on this
+# project wrote, and that the address it reads out of them is the client's
+# (ADR-0043).
+#
+# Two listeners on purpose. Port 25 is told to expect a PROXY header and port
+# 26 is not, so one container measures both what a correctly configured backend
+# does and what a backend that knows nothing about the header does.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        postfix \
+        rsyslog \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mail/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 25 26
+
+CMD ["/usr/local/bin/entrypoint.sh"]
