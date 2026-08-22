@@ -39,6 +39,7 @@ pub mod health;
 pub mod i18n;
 pub mod id;
 pub mod logging;
+pub mod matrix;
 pub mod node;
 pub mod template;
 pub mod validation;
@@ -64,6 +65,9 @@ pub use id::{
     VipId,
 };
 pub use logging::{AccessLog, LogLevel};
+pub use matrix::{
+    FIRST_VRID, LAST_VRID, Matrix, Placement, STEP, TOP, VRIDS, VirtualRouter, matrix,
+};
 pub use node::{Node, NodeRole};
 pub use template::{
     Applied, Argument, Arguments, Created, CreatedKind, Parameter, ParameterKind, Template,

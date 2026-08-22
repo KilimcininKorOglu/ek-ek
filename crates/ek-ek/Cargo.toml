@@ -14,9 +14,15 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+# `matrix` answers which node should hold which address. The answer is a pure
+# function of the configuration, so the command needs the model and nothing
+# else: no cluster, no network and no running agent.
+ek-ek-config = { workspace = true }
 ek-ek-dataplane = { workspace = true }
 ek-ek-log = { workspace = true }
 ek-ek-ipc = { workspace = true }
+# The configuration document on disk is JSON, and `matrix` reads one.
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

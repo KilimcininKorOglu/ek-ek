@@ -67,6 +67,9 @@ pub enum ErrorCode {
     /// A VIP prefers a node that is not defined.
     #[serde(rename = "config.vip.unknown_preferred_node")]
     VipUnknownPreferredNode,
+    /// More VIPs than the protocol has virtual router ids for.
+    #[serde(rename = "config.vip.too_many")]
+    VipTooMany,
     /// A certificate names a DNS provider that is not defined.
     #[serde(rename = "config.certificate.unknown_dns_provider")]
     CertificateUnknownDnsProvider,
@@ -101,7 +104,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -113,6 +116,7 @@ impl ErrorCode {
         Self::FrontendRedirectWithoutHttp,
         Self::VipInUse,
         Self::VipUnknownPreferredNode,
+        Self::VipTooMany,
         Self::CertificateUnknownDnsProvider,
         Self::BackendNoMembers,
         Self::BackendCookieStickinessOnUdp,
@@ -142,6 +146,7 @@ impl ErrorCode {
             Self::FrontendRedirectWithoutHttp => "config.frontend.redirect_without_http",
             Self::VipInUse => "config.vip.in_use",
             Self::VipUnknownPreferredNode => "config.vip.unknown_preferred_node",
+            Self::VipTooMany => "config.vip.too_many",
             Self::CertificateUnknownDnsProvider => "config.certificate.unknown_dns_provider",
             Self::BackendNoMembers => "config.backend.no_members",
             Self::BackendCookieStickinessOnUdp => "config.backend.cookie_stickiness_on_udp",
@@ -649,6 +654,23 @@ fn check_redirects(config: &Config, errors: &mut Vec<ValidationError>) {
 
 fn check_vips(config: &Config, errors: &mut Vec<ValidationError>) {
     let nodes: HashSet<&NodeId> = config.nodes.iter().map(|node| &node.id).collect();
+
+    // VRRP carries the virtual router id in one byte and zero is not one, so
+    // a segment holds 255 of them. Past that there is no number left to give
+    // an address, and the matrix would silently leave it out (T-034).
+    if config.vips.len() > crate::matrix::VRIDS {
+        errors.push(
+            ValidationError::new(ErrorCode::VipTooMany, FieldPath::root().field("vips"))
+                .with_number(
+                    "vip_count",
+                    i64::try_from(config.vips.len()).unwrap_or(i64::MAX),
+                )
+                .with_number(
+                    "limit",
+                    i64::try_from(crate::matrix::VRIDS).unwrap_or(i64::MAX),
+                ),
+        );
+    }
 
     for (at, vip) in config.vips.iter().enumerate() {
         if let Some(preferred) = &vip.preferred_node

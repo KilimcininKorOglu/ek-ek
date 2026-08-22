@@ -15,6 +15,11 @@ serde = { workspace = true }
 # JSON is a dependency here for a different reason: the translation catalogue
 # is JSON by decision (ADR-0015) and is read at startup.
 serde_json = { workspace = true }
+# The virtual router matrix hashes an identity into a number, and every node
+# has to reach the same answer. The standard library's hasher does not promise
+# the same value across Rust releases, so two nodes built with different
+# compilers would fight over every address (ADR-0074).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 # The locales checker is aimed at a catalogue built on purpose to be wrong,

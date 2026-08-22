@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::sample;
+use common::{address, sample};
 use ek_ek_config::{
     ApplicationProtocol, BackendId, CertificateId, ErrorCode, ParameterValue, PathCase, RuleAction,
     SameSitePolicy, SessionStickiness, TransportProtocol, ValidationErrors, VipId, validate,
@@ -440,6 +440,50 @@ fn a_vip_preferring_an_unknown_node_is_refused() {
     let mut config = sample();
     config.vips[0].preferred_node = None;
     assert!(validate(&config).is_ok());
+}
+
+#[test]
+fn more_vips_than_the_segment_has_router_ids_is_refused() {
+    // VRRP carries the virtual router id in one byte and zero is not one, so
+    // a segment holds 255 of them. The matrix would leave the extra addresses
+    // out, and an address nobody holds is an outage nobody was told about.
+    let fill = |config: &mut ek_ek_config::Config, count: usize| {
+        config.vips.clear();
+        for at in 0..count {
+            config.vips.push(ek_ek_config::Vip {
+                id: ek_ek_config::VipId::new(format!("vip-{at:03}")),
+                address: address(1),
+                prefix_length: 24,
+                interface: "eth0".to_owned(),
+                preferred_node: None,
+            });
+        }
+    };
+
+    // The limit itself is legal.
+    let mut config = sample();
+    fill(&mut config, ek_ek_config::VRIDS);
+    config.frontends.clear();
+    assert!(
+        validate(&config).is_ok(),
+        "255 addresses fit in 255 numbers: {:?}",
+        validate(&config).err().map(|found| found.codes())
+    );
+
+    // One more is not.
+    fill(&mut config, ek_ek_config::VRIDS + 1);
+    let found = faults(&config);
+
+    assert_eq!(found.codes(), vec![ErrorCode::VipTooMany]);
+    assert_eq!(found.as_slice()[0].path.as_text(), "vips");
+    assert_eq!(
+        found.as_slice()[0].parameters.get("limit"),
+        Some(&ParameterValue::Number(255))
+    );
+    assert_eq!(
+        found.as_slice()[0].parameters.get("vip_count"),
+        Some(&ParameterValue::Number(256))
+    );
 }
 
 #[test]

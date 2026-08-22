@@ -18,6 +18,7 @@
   "config.stickiness_key.missing": "Cookie based session stickiness is turned on, but no signing key of at least {shortest_bytes} bytes is configured.",
   "config.vip.in_use": "VIP '{vip}' is used by {frontend_count} frontends and cannot be removed.",
   "config.vip.unknown_preferred_node": "VIP '{vip}' prefers node '{node}', which is not defined.",
+  "config.vip.too_many": "The cluster defines {vip_count} VIPs, but one network segment holds at most {limit} virtual router ids.",
   "dialog.delete.body": "'{name}' will be removed permanently. {effect}",
   "dialog.delete.cancel": "Cancel",
   "dialog.delete.confirm": "Delete",

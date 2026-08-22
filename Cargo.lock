@@ -633,6 +633,7 @@ name = "ek-ek"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ek-ek-config",
  "ek-ek-dataplane",
  "ek-ek-ipc",
  "ek-ek-log",
@@ -658,6 +659,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

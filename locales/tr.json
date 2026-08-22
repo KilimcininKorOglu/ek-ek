@@ -18,6 +18,7 @@
   "config.stickiness_key.missing": "Çerez tabanlı oturum sürekliliği açık, ama en az {shortest_bytes} baytlık bir imza anahtarı yapılandırılmamış.",
   "config.vip.in_use": "'{vip}' VIP'i {frontend_count} frontend tarafından kullanılıyor ve silinemez.",
   "config.vip.unknown_preferred_node": "'{vip}' VIP'i tanımlı olmayan '{node}' düğümünü tercih ediyor.",
+  "config.vip.too_many": "Küme {vip_count} VIP tanımlıyor ancak bir ağ segmentinde en fazla {limit} sanal yönlendirici numarası vardır.",
   "dialog.delete.body": "'{name}' kalıcı olarak silinecek. {effect}",
   "dialog.delete.cancel": "Vazgeç",
   "dialog.delete.confirm": "Sil",
