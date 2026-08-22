@@ -133,6 +133,8 @@ pub struct Status {
     backend_connect_failures: AtomicU64,
     tls_handshakes_refused: AtomicU64,
     proxy_headers_without_an_address: AtomicU64,
+    backend_connections_opened: AtomicU64,
+    backend_connections_reused: AtomicU64,
     /// Where the open connection counts are read from (ADR-0061).
     ///
     /// Attached after the balancer exists rather than owned, because the
@@ -258,6 +260,22 @@ impl Status {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records a request that had to open its own backend connection.
+    pub fn backend_connection_opened(&self) {
+        self.backend_connections_opened
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a request served over a connection the pool already held.
+    ///
+    /// Counted separately from the opens rather than as a rate, because a
+    /// rate cannot be subtracted between two reports and a count can
+    /// (ADR-0061).
+    pub fn backend_connection_reused(&self) {
+        self.backend_connections_reused
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Returns how many PROXY headers went out stating no address.
     #[must_use]
     pub fn proxy_headers_without_an_address(&self) -> u64 {
@@ -278,6 +296,8 @@ impl Status {
             proxy_headers_without_an_address: self
                 .proxy_headers_without_an_address
                 .load(Ordering::Relaxed),
+            backend_connections_opened: self.backend_connections_opened.load(Ordering::Relaxed),
+            backend_connections_reused: self.backend_connections_reused.load(Ordering::Relaxed),
             // Read from the logger rather than counted here: the logger is
             // what knows its queue filled, and a second count would drift.
             log_records_dropped: ek_ek_log::dropped(),

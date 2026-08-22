@@ -156,6 +156,15 @@ pub struct Counters {
     /// climbing is how an operator learns the log has a gap in it.
     #[serde(default)]
     pub log_records_dropped: u64,
+    /// Backend connections this process had to open.
+    #[serde(default)]
+    pub backend_connections_opened: u64,
+    /// Requests served over a connection the pool already held.
+    ///
+    /// Two counts rather than a rate, so a reader works the rate out between
+    /// two reports and never has to trust one taken over the whole run.
+    #[serde(default)]
+    pub backend_connections_reused: u64,
 }
 
 /// How many connections one member is carrying, and from where (ADR-0061).

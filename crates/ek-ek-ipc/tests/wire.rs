@@ -56,6 +56,8 @@ fn a_message_survives_a_round_trip() {
             udp_sessions_evicted: 9,
             proxy_headers_without_an_address: 6,
             log_records_dropped: 8,
+            backend_connections_opened: 11,
+            backend_connections_reused: 7,
         },
         open_connections: vec![OpenConnections {
             frontend: "web".to_owned(),
