@@ -381,6 +381,10 @@ pub struct Document {
     pub proxy_protocol: Option<String>,
     /// Address the VIP carries, and so the address the frontend listens on.
     pub vip_address: String,
+    /// The frontend's access log settings, already rendered.
+    pub access_log: String,
+    /// The application log level, already rendered.
+    pub log_level: String,
     /// Prefix length the VIP is written with.
     pub prefix_length: u8,
 }
@@ -412,8 +416,32 @@ impl Document {
             stickiness_key: String::new(),
             proxy_protocol: Some("disabled".to_owned()),
             vip_address: "127.0.0.1".to_owned(),
+            access_log: r#"{"enabled":true,"sample_one_in":1}"#.to_owned(),
+            log_level: "info".to_owned(),
             prefix_length: 8,
         }
+    }
+
+    /// Sets the frontend's access log settings.
+    #[must_use]
+    pub fn access_log(mut self, enabled: bool, sample_one_in: u32) -> Self {
+        self.access_log = format!(r#"{{"enabled":{enabled},"sample_one_in":{sample_one_in}}}"#);
+        self
+    }
+
+    /// Leaves the access log settings out of the document entirely, which is
+    /// what a frontend nobody configured looks like.
+    #[must_use]
+    pub fn without_access_log_named(mut self) -> Self {
+        self.access_log = String::new();
+        self
+    }
+
+    /// Sets the application log level.
+    #[must_use]
+    pub fn log_level(mut self, level: &str) -> Self {
+        self.log_level = level.to_owned();
+        self
     }
 
     /// Turns the PROXY protocol on for the frontend, in the named format.
@@ -669,13 +697,19 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"{vip_address}","prefix_length":{prefix_length},"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
-"stickiness_key":"{stickiness_key}"}}"#,
+"stickiness_key":"{stickiness_key}","log_level":"{log_level}"}}"#,
             port = self.port,
             vip_address = self.vip_address,
+            log_level = self.log_level,
+            access_log = if self.access_log.is_empty() {
+                String::new()
+            } else {
+                format!(r#""access_log":{},"#, self.access_log)
+            },
             prefix_length = self.prefix_length,
             proxy_protocol = self
                 .proxy_protocol
@@ -1214,6 +1248,9 @@ pub struct DataPlane {
     /// Where the binary's own diagnostics go, so a test that fails can say
     /// what the binary said rather than only that nothing happened.
     complaints: PathBuf,
+    /// Where the log goes. Standard output, because that is where the product
+    /// writes it and journald collects it from (ADR-0037).
+    log: PathBuf,
 }
 
 impl DataPlane {
@@ -1226,14 +1263,39 @@ impl DataPlane {
         let at = NEXT.fetch_add(1, Ordering::SeqCst);
         let complaints = socket.with_extension(format!("stderr.{at}"));
         let errors = std::fs::File::create(&complaints).expect("a log file must be creatable");
+        let log = socket.with_extension(format!("stdout.{at}"));
+        let written = std::fs::File::create(&log).expect("a log file must be creatable");
         let child = Command::new(env!("CARGO_BIN_EXE_ek-ek"))
             .arg("data-plane")
             .arg("--agent-socket")
             .arg(socket)
             .stderr(errors)
+            .stdout(written)
             .spawn()
             .expect("the binary under test must start");
-        Self { child, complaints }
+        Self {
+            child,
+            complaints,
+            log,
+        }
+    }
+
+    /// Everything the binary has written to standard output, as raw text.
+    #[must_use]
+    pub fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Every complete log record written so far, parsed.
+    ///
+    /// A half written last line is skipped rather than failing the parse: the
+    /// process is still running and may be mid-write.
+    #[must_use]
+    pub fn records(&self) -> Vec<serde_json::Value> {
+        self.log_text()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     }
 
     /// What the binary has written to its error output so far.
@@ -1393,9 +1455,10 @@ impl Running {
             }
             assert!(
                 start.elapsed() <= STARTUP_PATIENCE,
-                "the traffic path never started listening on port {} (linked to the agent: {}); it said: {}",
+                "the traffic path never started listening on port {} (linked to the agent: {});\nit logged: {}\nit complained: {}",
                 self.port,
                 self.agent.is_linked(),
+                self.data_plane.log_text(),
                 self.data_plane.complaints()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1406,6 +1469,54 @@ impl Running {
     #[must_use]
     pub fn complaints(&self) -> String {
         self.data_plane.complaints()
+    }
+
+    /// Everything the process wrote to its log, parsed as records.
+    #[must_use]
+    pub fn records(&self) -> Vec<serde_json::Value> {
+        self.data_plane.records()
+    }
+
+    /// Everything the process wrote to its log, as raw text.
+    ///
+    /// Used by the leak scan, which asks whether a secret appears anywhere at
+    /// all rather than in a particular record.
+    #[must_use]
+    pub fn log_text(&self) -> String {
+        self.data_plane.log_text()
+    }
+
+    /// Access records for one transport, oldest first.
+    #[must_use]
+    pub fn access_records(&self, protocol: &str) -> Vec<serde_json::Value> {
+        self.records()
+            .into_iter()
+            .filter(|record| record["kind"] == "access" && record["protocol"] == protocol)
+            .collect()
+    }
+
+    /// Waits until the log holds at least this many access records, or gives
+    /// up. The writer thread is separate from the request path, so a record is
+    /// not on disk the moment a response arrives.
+    pub async fn wait_for_access_records(
+        &self,
+        protocol: &str,
+        least: usize,
+    ) -> Vec<serde_json::Value> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let found = self.access_records(protocol);
+            if found.len() >= least {
+                return found;
+            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(15),
+                "only {} {protocol} access record(s) were written, {least} were expected; the log holds:\n{}",
+                found.len(),
+                self.log_text()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// The agent socket this run is using, so a replacement process can
@@ -1961,6 +2072,8 @@ pub struct Report {
     pub open_connections: Vec<Open>,
     /// How many handshakes were refused for want of a certificate.
     pub tls_handshakes_refused: u64,
+    /// How many log records the queue had to throw away.
+    pub log_records_dropped: u64,
 }
 
 impl Report {
@@ -1974,6 +2087,9 @@ impl Report {
                 .unwrap_or(0),
             open_connections: open_connections(line),
             tls_handshakes_refused: field(line, "tls_handshakes_refused")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            log_records_dropped: field(line, "log_records_dropped")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
         }

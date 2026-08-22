@@ -24,7 +24,8 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ek_ek_config::{Config, ProxyProtocol};
@@ -36,7 +37,9 @@ use tokio::net::TcpStream;
 
 use crate::balance::Balancer;
 use crate::live::{Live, LiveConfig, Status};
+use crate::proxy::elapsed_ms;
 use crate::proxyproto;
+use crate::requestid;
 
 /// How much is moved in one copy step.
 ///
@@ -54,6 +57,9 @@ pub struct StreamProxy {
     status: Arc<Status>,
     /// Connection counts and the round robin cursor.
     balancer: Arc<Balancer>,
+    /// Connections this frontend has taken, which access log sampling counts
+    /// against.
+    seen: AtomicU64,
 }
 
 /// What one connection was routed to.
@@ -68,6 +74,9 @@ struct Routed {
     idle_timeout: Option<Duration>,
     /// Which PROXY header, if any, this backend is told the client with.
     proxy_protocol: ProxyProtocol,
+    /// Whether this connection gets an access record, decided from the same
+    /// snapshot as everything else.
+    logged: bool,
 }
 
 impl StreamProxy {
@@ -84,6 +93,7 @@ impl StreamProxy {
             live,
             status,
             balancer,
+            seen: AtomicU64::new(0),
         }
     }
 
@@ -120,6 +130,9 @@ impl StreamProxy {
                 seconds => Some(Duration::from_secs(u64::from(seconds))),
             },
             proxy_protocol: frontend.proxy_protocol,
+            logged: frontend
+                .access_log
+                .writes(self.seen.fetch_add(1, Ordering::Relaxed)),
         })
     }
 }
@@ -296,6 +309,11 @@ impl ServerApp for StreamProxy {
     ) -> Option<Stream> {
         let live = self.live.load();
         self.status.request_handled();
+        let started = Instant::now();
+        // Generated rather than read from the connection: an L4 stream has no
+        // header to carry one in, and the record still needs an identity the
+        // application log can be joined on (ADR-0037).
+        let request_id = requestid::generate();
 
         let address = client_address(&client);
 
@@ -338,8 +356,25 @@ impl ServerApp for StreamProxy {
         }
 
         let counted = Counted::open(&self.balancer, &self.frontend, &routed.pool, &routed.member);
-        let _ = couple(&mut client, &mut backend, routed.idle_timeout).await;
+        let moved = couple(&mut client, &mut backend, routed.idle_timeout).await;
         drop(counted);
+
+        if routed.logged {
+            let (to_backend, from_backend) = moved.unwrap_or((0, 0));
+            let client =
+                ends(&client).map_or_else(|| address.to_string(), |(peer, _)| peer.to_string());
+            ek_ek_log::access(
+                &ek_ek_log::Access::new(
+                    ek_ek_log::Protocol::Tcp,
+                    &self.frontend,
+                    &client,
+                    elapsed_ms(started),
+                )
+                .with_request_id(&request_id)
+                .to_backend(&routed.pool, &routed.member)
+                .tcp(to_backend, from_backend),
+            );
+        }
 
         // Never reused: this connection carried an opaque protocol and there
         // is no message boundary to hand the next one a clean start from.

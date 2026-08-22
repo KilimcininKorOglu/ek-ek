@@ -17,7 +17,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ek_ek_config::{ApplicationProtocol, Backend, ConnectionPooling, Frontend};
@@ -28,6 +29,7 @@ use pingora::upstreams::peer::Peer;
 use pingora::{Error, ErrorType};
 
 use crate::live::{Live, LiveConfig, Status};
+use crate::requestid;
 use crate::route::{Decision, decide};
 use crate::sticky::{self, Signer};
 
@@ -63,6 +65,16 @@ pub struct RequestContext {
     /// Built in the request filter, from the same snapshot everything else
     /// was decided from, and written when the answer comes back.
     set_cookie: Option<String>,
+    /// When the request arrived, so the access record can say how long it
+    /// took rather than when it finished.
+    started: Instant,
+    /// The identity every record of this request shares (ADR-0037).
+    request_id: String,
+    /// Whether this request gets an access record.
+    ///
+    /// Decided from the same snapshot as everything else, so a configuration
+    /// change never turns the log off halfway through a request.
+    logged: bool,
 }
 
 /// Proxies one frontend.
@@ -75,6 +87,9 @@ pub struct Proxy {
     status: Arc<Status>,
     /// Connection counts and the round robin cursor.
     balancer: Arc<crate::balance::Balancer>,
+    /// Requests this frontend has taken, which is what access log sampling
+    /// counts against. Per frontend, because the setting is per frontend.
+    seen: AtomicU64,
 }
 
 impl Proxy {
@@ -91,7 +106,37 @@ impl Proxy {
             live,
             status,
             balancer,
+            seen: AtomicU64::new(0),
         }
+    }
+
+    /// Builds the access record for one finished request.
+    ///
+    /// Every field is named. Nothing is copied out of a header the client
+    /// controls, because that is exactly how a secret reaches a log
+    /// (ADR-0037).
+    fn record(&self, session: &Session, ctx: &RequestContext) -> ek_ek_log::Access {
+        let header = session.req_header();
+        let status = session
+            .response_written()
+            .map_or(0, |written| written.status.as_u16());
+        let client = session
+            .client_addr()
+            .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+
+        let mut record = ek_ek_log::Access::new(
+            ek_ek_log::Protocol::Http,
+            &self.frontend,
+            &client,
+            elapsed_ms(ctx.started),
+        )
+        .with_request_id(&ctx.request_id)
+        .http(header.method.as_str(), header.uri.path(), status);
+
+        if let Some((pool, member)) = ctx.chosen.as_ref() {
+            record = record.to_backend(pool, member);
+        }
+        record
     }
 
     /// Finds this frontend in a snapshot.
@@ -228,6 +273,9 @@ impl ProxyHttp for Proxy {
             peer: None,
             chosen: None,
             set_cookie: None,
+            started: Instant::now(),
+            request_id: String::new(),
+            logged: false,
         }
     }
 
@@ -242,12 +290,28 @@ impl ProxyHttp for Proxy {
         let live = self.live.load();
         self.status.request_handled();
 
+        // Set before anything can answer early, so a refused request carries
+        // an id in its record like a served one does.
+        ctx.request_id = requestid::for_request(
+            session
+                .req_header()
+                .headers
+                .get(requestid::HEADER)
+                .and_then(|value| value.to_str().ok()),
+        );
+
         let Some(frontend) = self.frontend(&live) else {
             if let Some(header) = bare(NO_MEMBER) {
                 answer(session, header).await;
             }
             return Ok(true);
         };
+
+        // Sampling counts requests rather than drawing at random, so a rate
+        // means exactly what it says and a test can measure it.
+        ctx.logged = frontend
+            .access_log
+            .writes(self.seen.fetch_add(1, Ordering::Relaxed));
 
         if frontend.application != ApplicationProtocol::Http {
             if let Some(header) = bare(NO_MEMBER) {
@@ -419,10 +483,19 @@ impl ProxyHttp for Proxy {
                 .append_header(http::header::SET_COOKIE, cookie)
                 .ok();
         }
+        // Answered back so a user calling support can quote the identity of
+        // the request that failed, instead of a time nobody can search on.
+        upstream_response
+            .insert_header(requestid::HEADER, ctx.request_id.as_str())
+            .ok();
         Ok(())
     }
 
-    async fn logging(&self, _session: &mut Session, _error: Option<&Error>, ctx: &mut Self::CTX) {
+    async fn logging(&self, session: &mut Session, _error: Option<&Error>, ctx: &mut Self::CTX) {
+        if ctx.logged {
+            ek_ek_log::access(&self.record(session, ctx));
+        }
+
         // The count has to come down whether the request succeeded or not,
         // otherwise least connections would send every later request away
         // from a member that once failed.
@@ -463,4 +536,13 @@ impl ProxyHttp for Proxy {
             can_reuse_downstream: false,
         }
     }
+}
+
+/// How long ago something started, in milliseconds.
+///
+/// Written out once so the three transports report the same unit with the
+/// same precision, which is what makes two records comparable.
+#[must_use]
+pub fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
 }

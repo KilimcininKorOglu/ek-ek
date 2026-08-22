@@ -15,6 +15,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ek_ek_config::{Backend, Config, Frontend, TransportProtocol};
@@ -22,6 +23,8 @@ use tokio::net::UdpSocket;
 
 use crate::balance::Balancer;
 use crate::live::{Live, LiveConfig, Status};
+use crate::proxy::elapsed_ms;
+use crate::requestid;
 use crate::udp::Sessions;
 
 /// The largest datagram read in one go.
@@ -89,6 +92,9 @@ pub struct UdpProxy {
     status: Arc<Status>,
     /// Chooses members and knows which are healthy.
     balancer: Arc<Balancer>,
+    /// Sessions this frontend has opened, which access log sampling counts
+    /// against.
+    seen: AtomicU64,
 }
 
 impl UdpProxy {
@@ -107,6 +113,7 @@ impl UdpProxy {
             live,
             status,
             balancer,
+            seen: AtomicU64::new(0),
         }
     }
 
@@ -219,6 +226,7 @@ impl UdpProxy {
         draining: bool,
     ) {
         let now = Instant::now();
+        let started = now;
         if let Some(session) = sessions.refresh(client, now) {
             let _ = session.socket.socket.send(datagram).await;
             return;
@@ -255,6 +263,25 @@ impl UdpProxy {
             return;
         };
         let _ = upstream.socket.send(datagram).await;
+
+        if frontend
+            .access_log
+            .writes(self.seen.fetch_add(1, Ordering::Relaxed))
+        {
+            // One record per session, written when the session opens. A
+            // record per datagram would drown a DNS frontend's log.
+            ek_ek_log::access(
+                &ek_ek_log::Access::new(
+                    ek_ek_log::Protocol::Udp,
+                    &self.frontend,
+                    &client.to_string(),
+                    elapsed_ms(started),
+                )
+                .with_request_id(&requestid::generate())
+                .to_backend(name, member.id.as_str())
+                .udp(&client.to_string()),
+            );
+        }
 
         if draining {
             // The socket and its reader stay alive long enough for the answer

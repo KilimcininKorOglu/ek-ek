@@ -27,6 +27,7 @@ fn empty_config() -> Config {
         certificates: Vec::new(),
         dns_providers: Vec::new(),
         stickiness_key: String::new(),
+        log_level: Default::default(),
     }
 }
 
@@ -54,6 +55,7 @@ fn a_message_survives_a_round_trip() {
             tls_handshakes_refused: 4,
             udp_sessions_evicted: 9,
             proxy_headers_without_an_address: 6,
+            log_records_dropped: 8,
         },
         open_connections: vec![OpenConnections {
             frontend: "web".to_owned(),

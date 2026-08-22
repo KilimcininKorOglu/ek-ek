@@ -149,6 +149,13 @@ pub struct Counters {
     /// client's.
     #[serde(default)]
     pub proxy_headers_without_an_address: u64,
+    /// Log records dropped because the queue was full (ADR-0037).
+    ///
+    /// Nothing waits on the log, so a consumer of standard output that has
+    /// stopped costs records rather than requests. A number that keeps
+    /// climbing is how an operator learns the log has a gap in it.
+    #[serde(default)]
+    pub log_records_dropped: u64,
 }
 
 /// How many connections one member is carrying, and from where (ADR-0061).

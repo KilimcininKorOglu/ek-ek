@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use ek_ek_config::{Config, ValidationErrors, validate};
+use ek_ek_config::{Config, LogLevel, ValidationErrors, validate};
 use ek_ek_ipc::{ConfigUpdate, Counters, DataPlaneState, StatusReport, UdpSessions};
 
 use crate::balance::{Balancer, ring_for};
@@ -80,6 +80,7 @@ impl LiveConfig {
     /// Starts from a delivery that has already been checked.
     #[must_use]
     pub fn new(update: ConfigUpdate) -> Self {
+        adopt(&update);
         Self(ArcSwap::from_pointee(Live::build(update)))
     }
 
@@ -106,7 +107,17 @@ impl LiveConfig {
     /// Returns what is wrong with the delivery. The live configuration is
     /// untouched in that case, so a bad delivery costs nothing.
     pub fn apply(&self, update: ConfigUpdate) -> Result<(), ValidationErrors> {
-        validate(&update.config)?;
+        if let Err(refused) = validate(&update.config) {
+            // Named at warn, because a refused configuration means this node
+            // is still serving the previous one and nothing else says so.
+            log::warn!(
+                "configuration generation {} refused with {} problem(s)",
+                update.generation,
+                refused.len()
+            );
+            return Err(refused);
+        }
+        adopt(&update);
         self.0.store(Arc::new(Live::build(update)));
         Ok(())
     }
@@ -267,6 +278,9 @@ impl Status {
             proxy_headers_without_an_address: self
                 .proxy_headers_without_an_address
                 .load(Ordering::Relaxed),
+            // Read from the logger rather than counted here: the logger is
+            // what knows its queue filled, and a second count would drift.
+            log_records_dropped: ek_ek_log::dropped(),
         }
     }
 
@@ -338,5 +352,35 @@ impl Status {
                 .unwrap_or_default(),
             udp_sessions: self.udp_sessions(),
         }
+    }
+}
+
+/// Applies what a delivery says about logging, and records that it arrived.
+///
+/// The level is set before the record is written, so a delivery raising the
+/// level is itself logged at the new one and an operator turning detail on
+/// sees the change take effect immediately (ADR-0037).
+fn adopt(update: &ConfigUpdate) {
+    ek_ek_log::set_level(level_of(update.config.log_level));
+    log::info!(
+        "configuration generation {} applied with {} frontend(s)",
+        update.generation,
+        update.config.frontends.len()
+    );
+}
+
+/// The logging level a configured level stands for.
+///
+/// The two enums are separate because the configuration model depends on no
+/// other crate in the workspace (ADR-0014). A test walks every variant, so a
+/// level added on one side cannot be forgotten on the other.
+#[must_use]
+pub const fn level_of(level: LogLevel) -> ek_ek_log::Level {
+    match level {
+        LogLevel::Error => ek_ek_log::Level::Error,
+        LogLevel::Warn => ek_ek_log::Level::Warn,
+        LogLevel::Info => ek_ek_log::Level::Info,
+        LogLevel::Debug => ek_ek_log::Level::Debug,
+        LogLevel::Trace => ek_ek_log::Level::Trace,
     }
 }
