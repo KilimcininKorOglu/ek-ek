@@ -21,7 +21,7 @@
 #[cfg(target_os = "linux")]
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,8 +29,11 @@ use std::time::Duration;
 use std::time::{Instant, SystemTime};
 
 use ek_ek_vrrp::Settings;
+// Read where the arguments are read, which is everywhere: the defaults are
+// part of what a wrong argument is measured against.
+use ek_ek_vrrp::gateway::{INTERVAL as GATEWAY_INTERVAL, THRESHOLD as GATEWAY_THRESHOLD};
 #[cfg(target_os = "linux")]
-use ek_ek_vrrp::{Action, Carried, Carrier, Machine, Transport};
+use ek_ek_vrrp::{Action, Carried, Carrier, Effect, Health, Machine, Pinger, Transport, Watch};
 
 /// How often the loop looks at its timers.
 ///
@@ -54,6 +57,14 @@ struct Options {
     carried: Vec<Carrying>,
     /// Whether announcing is switched off.
     silent: bool,
+    /// Whether the gateway is watched at all.
+    watch_gateway: bool,
+    /// How often the gateway is asked.
+    check_interval: Duration,
+    /// How many answers have to go missing before the claim is lowered.
+    threshold: u32,
+    /// What the claim is lowered to.
+    demoted_priority: u8,
 }
 
 /// One address and how much of it is the network.
@@ -108,6 +119,10 @@ fn run(options: Options, transport: &impl Transport) -> ExitCode {
         interface,
         carried,
         silent,
+        watch_gateway,
+        check_interval,
+        threshold,
+        demoted_priority,
     } = options;
 
     let carried = carried
@@ -128,6 +143,31 @@ fn run(options: Options, transport: &impl Transport) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    let mut checker = if watch_gateway {
+        match open_check(&interface, check_interval, threshold) {
+            Ok(checker) => Some(checker),
+            Err(error) => {
+                eprintln!("ek-ek-vrrp-node: the gateway check could not start: {error}");
+                eprintln!("ek-ek-vrrp-node: ICMP is IP protocol 1 and needs CAP_NET_RAW");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(Check { watch, .. }) = checker.as_ref() {
+        // Said once at startup, so a node with no default route is a line in
+        // the log rather than a check nobody notices is not running.
+        say(&format!(
+            r#"{{"kind":"gateway","ts":{},"event":"watching","health":"{}","gateway":"{}"}}"#,
+            milliseconds(),
+            watch.health().name(),
+            watch
+                .gateway()
+                .map_or_else(|| "none".to_owned(), |address| address.to_string())
+        ));
+    }
 
     let peers = settings.peers.clone();
     let mut machine = Machine::new(settings);
@@ -193,6 +233,19 @@ fn run(options: Options, transport: &impl Transport) -> ExitCode {
             heard_at,
             now,
         );
+
+        if let Some(check) = checker.as_mut() {
+            let actions = check_gateway(check, &mut machine, demoted_priority, now);
+            carry_out(
+                &mut machine,
+                &mut carrier,
+                actions,
+                transport,
+                &peers,
+                heard_at,
+                now,
+            );
+        }
 
         // The announcement is spread over the loop rather than sent in one
         // block, so the advertisement and the socket read are not held for
@@ -287,6 +340,152 @@ fn carry_out(
     }
 }
 
+/// The gateway check on this node, and the question it is waiting on.
+#[cfg(target_os = "linux")]
+struct Check {
+    watch: Watch,
+    pinger: Pinger,
+    /// The sequence number of the question no answer has arrived for.
+    ///
+    /// One at a time: the next question is only sent when the interval
+    /// elapses, and the one before it counts as lost at that moment.
+    waiting: Option<u16>,
+}
+
+/// Reads the default gateway and opens the socket the question travels on.
+///
+/// The gateway is read once at startup. A route that changes while the node
+/// runs is a case for a later task; reading it on every check would ask the
+/// kernel a question every two seconds to learn something that changes once
+/// in a machine's life.
+#[cfg(target_os = "linux")]
+fn open_check(interface: &str, interval: Duration, threshold: u32) -> io::Result<Check> {
+    let index = ek_ek_vrrp::Interface::read(interface)
+        .ok()
+        .map(|found| found.index);
+    let netlink = ek_ek_vrrp::netlink::Netlink::open()?;
+    let gateway = netlink.gateway(ek_ek_vrrp::route::Family::V4, index)?;
+    Ok(Check {
+        watch: Watch::new(gateway, interval, threshold),
+        pinger: Pinger::open()?,
+        waiting: None,
+    })
+}
+
+/// Asks the gateway, reads what came back, and acts on the count.
+///
+/// Returns what the state machine asked for, which is nothing at all until
+/// the threshold is reached on a node that holds the role.
+#[cfg(target_os = "linux")]
+fn check_gateway(
+    check: &mut Check,
+    machine: &mut Machine,
+    demoted: u8,
+    now: Instant,
+) -> Vec<Action> {
+    let mut actions = Vec::new();
+
+    // Answers first, so a reply that arrived just before the deadline is not
+    // counted as lost by the question that follows it.
+    loop {
+        match check.pinger.collect() {
+            Ok(Some((from, echo))) => {
+                if check.watch.gateway() != Some(IpAddr::V4(from)) {
+                    continue;
+                }
+                if check.waiting != Some(echo.sequence) {
+                    continue;
+                }
+                check.waiting = None;
+                let before = check.watch.health();
+                let effect = check.watch.answered();
+                // The first answer is the moment the check starts counting.
+                // Without a line for it there is no way to tell a gateway
+                // that answers from one that never did, and the difference
+                // decides whether this node ever gives an address up.
+                if before == Health::Unconfirmed {
+                    say(&format!(
+                        r#"{{"kind":"gateway","ts":{},"event":"confirmed","health":"{}","gateway":"{from}"}}"#,
+                        milliseconds(),
+                        check.watch.health().name()
+                    ));
+                }
+                if effect == Some(Effect::Restore) {
+                    say(&format!(
+                        r#"{{"kind":"gateway","ts":{},"event":"back","health":"{}","priority":{}}}"#,
+                        milliseconds(),
+                        Health::Reachable.name(),
+                        machine.configured()
+                    ));
+                    actions.extend(machine.restore(now));
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                say(&format!(
+                    r#"{{"kind":"app","level":"error","target":"ek_ek_vrrp","message":"the ICMP socket could not be read: {}"}}"#,
+                    escaped(&error.to_string())
+                ));
+                break;
+            }
+        }
+    }
+
+    let Some(gateway) = check.watch.due(now) else {
+        return actions;
+    };
+
+    // The question before this one was never answered.
+    if check.waiting.take().is_some() {
+        actions.extend(note_missed(check, machine, demoted, now));
+    }
+
+    let IpAddr::V4(gateway) = gateway else {
+        // RFC 5798 keeps one virtual router to one address family, and this
+        // one is IPv4. An IPv6 default route is somebody else's question.
+        return actions;
+    };
+    match check.pinger.ask(gateway) {
+        Ok(sequence) => check.waiting = Some(sequence),
+        Err(error) => {
+            // A question that could not even be sent is a question with no
+            // answer. The kernel refuses the send outright when the route to
+            // the gateway is gone, which is one of the shapes a lost uplink
+            // takes; the other is a send that leaves and is never answered.
+            // Counting only the second would leave the first unmeasured, and
+            // the node would hold the address through it.
+            say(&format!(
+                r#"{{"kind":"app","level":"warn","target":"ek_ek_vrrp","message":"the gateway could not be asked: {}"}}"#,
+                escaped(&error.to_string())
+            ));
+            actions.extend(note_missed(check, machine, demoted, now));
+        }
+    }
+    actions
+}
+
+/// Counts one question nobody answered, and acts when that is enough.
+#[cfg(target_os = "linux")]
+fn note_missed(check: &mut Check, machine: &mut Machine, demoted: u8, now: Instant) -> Vec<Action> {
+    let effect = check.watch.missed();
+    say(&format!(
+        r#"{{"kind":"gateway","ts":{},"event":"missed","health":"{}","missing":{}}}"#,
+        milliseconds(),
+        check.watch.health().name(),
+        check.watch.missing()
+    ));
+    if effect != Some(Effect::Demote) {
+        return Vec::new();
+    }
+    say(&format!(
+        r#"{{"kind":"gateway","ts":{},"event":"lost","health":"{}","priority":{}}}"#,
+        milliseconds(),
+        Health::Lost.name(),
+        demoted
+    ));
+    machine.demote(demoted, now)
+}
+
 /// The carried addresses as a JSON array.
 #[cfg(target_os = "linux")]
 fn listed(carrier: &Carrier) -> String {
@@ -343,6 +542,10 @@ fn read(arguments: &[String]) -> Result<Options, String> {
     let mut interval = Duration::from_millis(300);
     let mut preempt = true;
     let mut silent = false;
+    let mut watch_gateway = false;
+    let mut check_interval = GATEWAY_INTERVAL;
+    let mut threshold = GATEWAY_THRESHOLD;
+    let mut demoted_priority = 1_u8;
 
     let mut rest = arguments.iter().skip(1);
     while let Some(name) = rest.next() {
@@ -366,6 +569,14 @@ fn read(arguments: &[String]) -> Result<Options, String> {
             // announcement that moved a cache from a cache that was going to
             // name this node anyway (T-010).
             "--silent" => silent = true,
+            "--watch-gateway" => watch_gateway = true,
+            "--check-interval-ms" => {
+                check_interval = Duration::from_millis(parse(rest.next(), "--check-interval-ms")?);
+            }
+            "--failures" => threshold = parse(rest.next(), "--failures")?,
+            "--demoted-priority" => {
+                demoted_priority = parse(rest.next(), "--demoted-priority")?;
+            }
             other => return Err(format!("{other} is not an argument this understands")),
         }
     }
@@ -402,6 +613,10 @@ fn read(arguments: &[String]) -> Result<Options, String> {
         interface,
         carried,
         silent,
+        watch_gateway,
+        check_interval,
+        threshold,
+        demoted_priority,
     })
 }
 

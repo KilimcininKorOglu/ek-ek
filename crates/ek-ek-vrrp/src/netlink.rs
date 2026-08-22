@@ -104,6 +104,38 @@ impl Netlink {
         }
     }
 
+    /// The gateway every packet leaving this segment goes through.
+    ///
+    /// Returns nothing when the machine has no default route, which is a
+    /// state to report rather than a failure to act on (ADR-0030). When an
+    /// interface is named, only routes leaving from it count.
+    ///
+    /// # Errors
+    ///
+    /// Returns what the socket said. A dump needs no capability, so this
+    /// works wherever the socket opens.
+    pub fn gateway(
+        &self,
+        family: crate::route::Family,
+        interface: Option<u32>,
+    ) -> io::Result<Option<IpAddr>> {
+        let sequence = next();
+        self.say(&crate::route::list(family, sequence))?;
+
+        let mut found = Vec::new();
+        loop {
+            let mut buffer = [0_u8; MOST];
+            let read = (&self.socket).read(&mut buffer)?;
+            let said = buffer.get(..read).unwrap_or_default();
+            found.extend(crate::route::defaults(said));
+            if finished(said) {
+                // Chosen over the whole answer rather than per read: the
+                // cheapest route of one read is not the cheapest of the dump.
+                return Ok(crate::route::cheapest(found, interface));
+            }
+        }
+    }
+
     /// Writes one message to the kernel.
     fn say(&self, bytes: &[u8]) -> io::Result<()> {
         let written = (&self.socket).write(bytes)?;

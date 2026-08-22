@@ -65,6 +65,11 @@ pub enum Reason {
     /// nothing and lets nobody else answer either, which is worse than not
     /// holding the role at all.
     AddressRefused,
+    /// The way out of the segment stopped answering.
+    ///
+    /// A node that cannot reach its gateway carries the address to nowhere:
+    /// clients reach it and their traffic stops there (ADR-0030).
+    GatewayLost,
 }
 
 impl Reason {
@@ -77,6 +82,7 @@ impl Reason {
             Self::StrongerPeer => "stronger_peer",
             Self::Stopped => "stopped",
             Self::AddressRefused => "address_refused",
+            Self::GatewayLost => "gateway_lost",
         }
     }
 }
@@ -192,6 +198,12 @@ impl Settings {
 /// One virtual router on this node.
 pub struct Machine {
     settings: Settings,
+    /// What the configuration asked this node to claim.
+    ///
+    /// Held apart from `settings.priority`, which a gateway fault lowers, so
+    /// the claim can be put back exactly where it was rather than at a value
+    /// worked out again from something else.
+    configured: u8,
     state: State,
     /// When the next advertisement is due, while this node is master.
     advertise_at: Option<Instant>,
@@ -206,6 +218,7 @@ impl Machine {
     #[must_use]
     pub const fn new(settings: Settings) -> Self {
         Self {
+            configured: settings.priority,
             settings,
             state: State::Initialize,
             advertise_at: None,
@@ -401,6 +414,47 @@ impl Machine {
             return Vec::new();
         }
         self.become_backup(now, Reason::AddressRefused)
+    }
+
+    /// What the configuration asked this node to claim.
+    ///
+    /// The same as [`Settings::priority`] until a fault lowers the claim.
+    #[must_use]
+    pub const fn configured(&self) -> u8 {
+        self.configured
+    }
+
+    /// Lowers this node's claim and stands the node down if it holds the role.
+    ///
+    /// Standing down here rather than waiting to be outranked: with preempt
+    /// switched off no peer would ever take the role, and the node would keep
+    /// an address it cannot serve. Giving it up at once means the takeover
+    /// does not depend on a setting that is about something else (ADR-0030).
+    ///
+    /// The lowered claim is what keeps the node from taking the role straight
+    /// back: it now waits the longest of anybody, and any peer that answers
+    /// outranks it. When nobody answers it does take the address back, which
+    /// is right, because an address nobody holds serves nobody either.
+    pub fn demote(&mut self, to: u8, now: Instant) -> Vec<Action> {
+        if self.settings.priority == to {
+            return Vec::new();
+        }
+        self.settings.priority = to;
+        if self.state != State::Master {
+            return Vec::new();
+        }
+        self.become_backup(now, Reason::GatewayLost)
+    }
+
+    /// Puts the claim back where the configuration had it.
+    ///
+    /// Nothing else happens here. A node whose claim is strong again takes
+    /// the role by the ordinary rule, when it hears a master it outranks and
+    /// preempt is on, so a fault that comes and goes moves the address by the
+    /// same path as any other change of claim.
+    pub fn restore(&mut self, _now: Instant) -> Vec<Action> {
+        self.settings.priority = self.configured;
+        Vec::new()
     }
 
     /// What a master does with an advertisement it hears.

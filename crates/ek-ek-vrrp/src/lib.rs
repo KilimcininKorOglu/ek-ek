@@ -22,13 +22,18 @@ pub mod address;
 pub mod announce;
 #[cfg(target_os = "linux")]
 pub mod carrier;
+pub mod echo;
 #[cfg(target_os = "linux")]
 pub mod frame;
+pub mod gateway;
 pub mod header;
 pub mod interface;
 #[cfg(target_os = "linux")]
 pub mod netlink;
 pub mod packet;
+#[cfg(target_os = "linux")]
+pub mod ping;
+pub mod route;
 #[cfg(target_os = "linux")]
 pub mod socket;
 pub mod state;
@@ -38,8 +43,13 @@ pub use address::{Address, Answer, Change, Family};
 pub use announce::{Arp, arp, neighbor};
 #[cfg(target_os = "linux")]
 pub use carrier::{ANNOUNCEMENTS, Carried, Carrier, GAP};
+pub use echo::Echo;
+pub use gateway::{Effect, Health, INTERVAL, THRESHOLD, Watch};
 pub use interface::Interface;
 pub use packet::{ADVERTISEMENT, Advertisement, GIVING_UP, Malformed, PROTOCOL, VERSION};
+#[cfg(target_os = "linux")]
+pub use ping::Pinger;
+pub use route::Route;
 #[cfg(target_os = "linux")]
 pub use socket::RawSocket;
 pub use state::{Action, Ignored, Machine, Reason, Settings, State, Transition};
