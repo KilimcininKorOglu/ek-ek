@@ -138,6 +138,58 @@ fn removing_a_vip_a_frontend_uses_is_refused() {
 }
 
 #[test]
+fn removing_a_certificate_a_frontend_offers_is_refused() {
+    let config = sample();
+
+    let refused =
+        ek_ek_config::validate_certificate_removal(&config, &CertificateId::new("cert-web"))
+            .expect_err("a frontend still offers this certificate");
+
+    assert_eq!(refused.codes(), vec![ErrorCode::CertificateInUse]);
+    assert_eq!(
+        refused.as_slice()[0].parameters.get("certificate"),
+        Some(&ParameterValue::Identifier("cert-web".to_owned()))
+    );
+    assert_eq!(
+        refused.as_slice()[0].parameters.get("frontend_count"),
+        Some(&ParameterValue::Number(1))
+    );
+
+    // The same call on a certificate nobody offers must succeed, otherwise
+    // the check would simply refuse every removal.
+    assert!(
+        ek_ek_config::validate_certificate_removal(&config, &CertificateId::new("cert-unused"))
+            .is_ok()
+    );
+
+    // Named only as the fallback still counts as offered. A frontend left
+    // pointing at a certificate that is gone answers no handshake at all.
+    let mut only_default = sample();
+    let tls = only_default.frontends[0]
+        .tls
+        .as_mut()
+        .expect("the fixture terminates TLS here");
+    tls.certificates.clear();
+    assert_eq!(
+        tls.default_certificate,
+        Some(CertificateId::new("cert-web"))
+    );
+    let refused =
+        ek_ek_config::validate_certificate_removal(&only_default, &CertificateId::new("cert-web"))
+            .expect_err("it is still the fallback");
+    assert_eq!(refused.codes(), vec![ErrorCode::CertificateInUse]);
+
+    // And a frontend that terminates no TLS at all offers nothing.
+    let mut plain = sample();
+    for frontend in &mut plain.frontends {
+        frontend.tls = None;
+    }
+    assert!(
+        ek_ek_config::validate_certificate_removal(&plain, &CertificateId::new("cert-web")).is_ok()
+    );
+}
+
+#[test]
 fn a_backend_with_no_members_is_refused() {
     let mut config = sample();
     config.backends[1].members.clear();

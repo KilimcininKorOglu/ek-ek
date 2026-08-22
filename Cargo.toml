@@ -49,9 +49,10 @@ tempfile = "3"
 pingora = { version = "0.8", default-features = false, features = ["openssl", "proxy", "lb"] }
 arc-swap = "1"
 async-trait = "0.1"
-# Only ever a dev-dependency. Tests build certificates and speak TLS from the
-# client side, and this is the library pingora's openssl backend already uses,
-# so both sides of a handshake agree on what a certificate is (ADR-0068).
+# The library pingora's openssl backend already uses, so both sides of a
+# handshake agree on what a certificate is (ADR-0068). A dev-dependency
+# wherever tests build certificates and speak TLS from the client side, and a
+# real dependency of ek-ek-tls, which inspects what an operator uploads.
 openssl = "0.10"
 # UDP listeners need SO_REUSEPORT so a replacement process can bind the port
 # the old one is still serving. The standard library has no way to set a
@@ -84,4 +85,5 @@ ek-ek-dataplane = { path = "crates/ek-ek-dataplane" }
 ek-ek-ipc = { path = "crates/ek-ek-ipc" }
 ek-ek-log = { path = "crates/ek-ek-log" }
 ek-ek-store = { path = "crates/ek-ek-store" }
+ek-ek-tls = { path = "crates/ek-ek-tls" }
 ek-ek-vrrp = { path = "crates/ek-ek-vrrp" }

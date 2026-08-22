@@ -723,6 +723,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ek-ek-tls"
+version = "0.1.0"
+dependencies = [
+ "ek-ek-config",
+ "ek-ek-store",
+ "openssl",
+ "tempfile",
+]
+
+[[package]]
 name = "ek-ek-vrrp"
 version = "0.1.0"
 dependencies = [

@@ -73,6 +73,30 @@ pub enum ErrorCode {
     /// A certificate names a DNS provider that is not defined.
     #[serde(rename = "config.certificate.unknown_dns_provider")]
     CertificateUnknownDnsProvider,
+    /// A certificate is still offered by a frontend.
+    #[serde(rename = "config.certificate.in_use")]
+    CertificateInUse,
+    /// The uploaded chain is not readable as PEM.
+    #[serde(rename = "certificate.chain.unreadable")]
+    CertificateChainUnreadable,
+    /// The uploaded chain parsed but holds no certificate.
+    #[serde(rename = "certificate.chain.empty")]
+    CertificateChainEmpty,
+    /// The uploaded chain holds more certificates than anybody serves.
+    #[serde(rename = "certificate.chain.too_long")]
+    CertificateChainTooLong,
+    /// The uploaded key is not readable as PEM.
+    #[serde(rename = "certificate.key.unreadable")]
+    CertificateKeyUnreadable,
+    /// The uploaded key does not belong to the leaf certificate.
+    #[serde(rename = "certificate.key.mismatch")]
+    CertificateKeyMismatch,
+    /// The uploaded key is encrypted and no passphrase was given.
+    #[serde(rename = "certificate.key.passphrase_required")]
+    CertificateKeyPassphraseRequired,
+    /// The passphrase does not open the uploaded key.
+    #[serde(rename = "certificate.key.passphrase_wrong")]
+    CertificateKeyPassphraseWrong,
     /// A backend pool has nobody to send traffic to.
     #[serde(rename = "config.backend.no_members")]
     BackendNoMembers,
@@ -104,7 +128,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 30] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -118,6 +142,14 @@ impl ErrorCode {
         Self::VipUnknownPreferredNode,
         Self::VipTooMany,
         Self::CertificateUnknownDnsProvider,
+        Self::CertificateInUse,
+        Self::CertificateChainUnreadable,
+        Self::CertificateChainEmpty,
+        Self::CertificateChainTooLong,
+        Self::CertificateKeyUnreadable,
+        Self::CertificateKeyMismatch,
+        Self::CertificateKeyPassphraseRequired,
+        Self::CertificateKeyPassphraseWrong,
         Self::BackendNoMembers,
         Self::BackendCookieStickinessOnUdp,
         Self::StickinessKeyMissing,
@@ -148,6 +180,14 @@ impl ErrorCode {
             Self::VipUnknownPreferredNode => "config.vip.unknown_preferred_node",
             Self::VipTooMany => "config.vip.too_many",
             Self::CertificateUnknownDnsProvider => "config.certificate.unknown_dns_provider",
+            Self::CertificateInUse => "config.certificate.in_use",
+            Self::CertificateChainUnreadable => "certificate.chain.unreadable",
+            Self::CertificateChainEmpty => "certificate.chain.empty",
+            Self::CertificateChainTooLong => "certificate.chain.too_long",
+            Self::CertificateKeyUnreadable => "certificate.key.unreadable",
+            Self::CertificateKeyMismatch => "certificate.key.mismatch",
+            Self::CertificateKeyPassphraseRequired => "certificate.key.passphrase_required",
+            Self::CertificateKeyPassphraseWrong => "certificate.key.passphrase_wrong",
             Self::BackendNoMembers => "config.backend.no_members",
             Self::BackendCookieStickinessOnUdp => "config.backend.cookie_stickiness_on_udp",
             Self::StickinessKeyMissing => "config.stickiness_key.missing",
@@ -265,7 +305,13 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    pub(crate) fn new(code: ErrorCode, path: FieldPath) -> Self {
+    /// Builds an error against one field.
+    ///
+    /// Public because faults are found outside this crate as well: an
+    /// uploaded certificate is refused by `ek-ek-tls`, and an operator has to
+    /// read that refusal in the same shape as any other (ADR-0015).
+    #[must_use]
+    pub fn new(code: ErrorCode, path: FieldPath) -> Self {
         Self {
             code,
             path,
@@ -273,7 +319,9 @@ impl ValidationError {
         }
     }
 
-    pub(crate) fn with_id(mut self, name: &str, value: &str) -> Self {
+    /// Adds an identifier the translated sentence needs.
+    #[must_use]
+    pub fn with_id(mut self, name: &str, value: &str) -> Self {
         self.parameters.insert(
             name.to_owned(),
             ParameterValue::Identifier(value.to_owned()),
@@ -281,7 +329,9 @@ impl ValidationError {
         self
     }
 
-    pub(crate) fn with_number(mut self, name: &str, value: i64) -> Self {
+    /// Adds a number the translated sentence needs.
+    #[must_use]
+    pub fn with_number(mut self, name: &str, value: i64) -> Self {
         self.parameters
             .insert(name.to_owned(), ParameterValue::Number(value));
         self
@@ -294,8 +344,10 @@ impl ValidationError {
 pub struct ValidationErrors(Vec<ValidationError>);
 
 impl ValidationErrors {
-    /// Gathers errors found outside this module, such as by a template.
-    pub(crate) fn from_errors(errors: Vec<ValidationError>) -> Self {
+    /// Gathers errors found outside this module, such as by a template or by
+    /// the certificate upload path.
+    #[must_use]
+    pub fn from_errors(errors: Vec<ValidationError>) -> Self {
         Self(errors)
     }
 
@@ -390,6 +442,59 @@ pub fn validate_vip_removal(config: &Config, vip: &VipId) -> Result<(), Validati
     }
 
     Err(ValidationErrors(vec![error]))
+}
+
+/// Refuses removing a certificate a frontend still offers.
+///
+/// Checked here rather than in the store, for the same reason a VIP is: the
+/// store keeps state and this layer knows what the state means. A frontend
+/// left pointing at a certificate that is gone answers no handshake, and the
+/// fault shows up as a TLS error nobody can place (T-013).
+///
+/// # Errors
+///
+/// Returns one error naming every frontend that still offers it, so an
+/// operator sees the whole list rather than one name per attempt.
+pub fn validate_certificate_removal(
+    config: &Config,
+    certificate: &CertificateId,
+) -> Result<(), ValidationErrors> {
+    let users: Vec<&crate::frontend::Frontend> = config
+        .frontends
+        .iter()
+        .filter(|frontend| offers(frontend, certificate))
+        .collect();
+
+    if users.is_empty() {
+        return Ok(());
+    }
+
+    let mut error = ValidationError::new(
+        ErrorCode::CertificateInUse,
+        FieldPath::root()
+            .field("certificates")
+            .field(certificate.as_str()),
+    )
+    .with_id("certificate", certificate.as_str())
+    .with_number("frontend_count", users.len() as i64);
+
+    for (position, frontend) in users.iter().enumerate() {
+        error = error.with_id(&format!("frontend_{position}"), frontend.id.as_str());
+    }
+
+    Err(ValidationErrors(vec![error]))
+}
+
+/// Whether a frontend offers one certificate.
+///
+/// Both places count: the list it picks from per handshake, and the one it
+/// falls back to when the handshake carries no name it knows. A certificate
+/// named only as the default is still in use.
+fn offers(frontend: &crate::frontend::Frontend, certificate: &CertificateId) -> bool {
+    let Some(tls) = &frontend.tls else {
+        return false;
+    };
+    tls.certificates.contains(certificate) || tls.default_certificate.as_ref() == Some(certificate)
 }
 
 fn check_duplicate_ids(config: &Config, errors: &mut Vec<ValidationError>) {
@@ -928,17 +1033,36 @@ pub enum WarningCode {
     /// every request it would take.
     #[serde(rename = "config.frontend.unreachable_routing_rule")]
     FrontendUnreachableRoutingRule,
+    /// An uploaded certificate is past its validity window.
+    ///
+    /// Uploading one is allowed on purpose: an operator may install the
+    /// replacement before switching to it. The warning cannot be silenced.
+    #[serde(rename = "certificate.expired")]
+    CertificateExpired,
+    /// An uploaded chain stops before a self-signed certificate.
+    ///
+    /// Clients that do not already hold the missing issuer refuse the
+    /// handshake, and the fault looks like a broken certificate rather than a
+    /// short chain.
+    #[serde(rename = "certificate.chain.incomplete")]
+    CertificateChainIncomplete,
 }
 
 impl WarningCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 1] = [Self::FrontendUnreachableRoutingRule];
+    pub const ALL: [Self; 3] = [
+        Self::FrontendUnreachableRoutingRule,
+        Self::CertificateExpired,
+        Self::CertificateChainIncomplete,
+    ];
 
     /// Returns the translation key this code is looked up under.
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
             Self::FrontendUnreachableRoutingRule => "config.frontend.unreachable_routing_rule",
+            Self::CertificateExpired => "certificate.expired",
+            Self::CertificateChainIncomplete => "certificate.chain.incomplete",
         }
     }
 }
@@ -958,7 +1082,12 @@ pub struct ValidationWarning {
 }
 
 impl ValidationWarning {
-    fn new(code: WarningCode, path: FieldPath) -> Self {
+    /// Builds a warning against one field.
+    ///
+    /// Public for the same reason [`ValidationError::new`] is: an uploaded
+    /// certificate that works but is worth a word comes from another crate.
+    #[must_use]
+    pub fn new(code: WarningCode, path: FieldPath) -> Self {
         Self {
             code,
             path,
@@ -966,7 +1095,9 @@ impl ValidationWarning {
         }
     }
 
-    fn with_id(mut self, name: &str, value: &str) -> Self {
+    /// Adds an identifier the translated sentence needs.
+    #[must_use]
+    pub fn with_id(mut self, name: &str, value: &str) -> Self {
         self.parameters.insert(
             name.to_owned(),
             ParameterValue::Identifier(value.to_owned()),
@@ -974,7 +1105,9 @@ impl ValidationWarning {
         self
     }
 
-    fn with_number(mut self, name: &str, value: i64) -> Self {
+    /// Adds a number the translated sentence needs.
+    #[must_use]
+    pub fn with_number(mut self, name: &str, value: i64) -> Self {
         self.parameters
             .insert(name.to_owned(), ParameterValue::Number(value));
         self

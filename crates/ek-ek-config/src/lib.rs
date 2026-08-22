@@ -75,6 +75,7 @@ pub use template::{
 };
 pub use validation::{
     ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors,
-    ValidationWarning, WarningCode, inspect, validate, validate_vip_removal,
+    ValidationWarning, WarningCode, inspect, validate, validate_certificate_removal,
+    validate_vip_removal,
 };
 pub use vip::Vip;

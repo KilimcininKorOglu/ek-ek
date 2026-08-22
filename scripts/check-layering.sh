@@ -24,8 +24,14 @@ RULES = [
     ("ek-ek-config", "ek-ek-store", "the config model is the base layer"),
     ("ek-ek-config", "ek-ek-vrrp", "the config model is the base layer"),
     ("ek-ek-config", "ek-ek", "the config model is the base layer"),
+    ("ek-ek-config", "ek-ek-tls", "the config model is the base layer"),
     ("ek-ek-dataplane", "ek-ek-vrrp", "the traffic path must not know about VRRP"),
     ("ek-ek-vrrp", "ek-ek-dataplane", "VRRP must not know about the traffic path"),
+    # Certificate upload is a control plane job. It reads what an operator
+    # sends and writes a store state; nothing it does happens while a request
+    # does (ADR-0002).
+    ("ek-ek-tls", "ek-ek-dataplane", "the upload path must not pull in the traffic path"),
+    ("ek-ek-tls", "ek-ek-vrrp", "certificates have nothing to do with VRRP"),
 ]
 
 # Crates that must depend on no workspace crate at all.

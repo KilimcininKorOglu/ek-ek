@@ -1,0 +1,27 @@
+[package]
+name = "ek-ek-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
+description = "Certificate inspection and upload for the control plane"
+
+[dependencies]
+ek-ek-config = { workspace = true }
+# An upload ends as a store state: the certificate record and the two pieces
+# of material it references have to arrive together or not at all.
+ek-ek-store = { workspace = true }
+# The same library the traffic path serves handshakes with (ADR-0068), so a
+# certificate this crate accepts is one that path can load. A second parser
+# would let the two disagree about what a certificate is.
+openssl = { workspace = true }
+
+[dev-dependencies]
+# The measurements write a store to disk, to read back what really landed
+# there.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
