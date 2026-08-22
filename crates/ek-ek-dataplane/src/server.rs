@@ -141,6 +141,10 @@ pub fn build(link: AgentLink) -> Result<Server> {
     // every swap.
     let balancer = Arc::new(Balancer::new());
     status.watch(Arc::clone(&balancer));
+    // One set of pool gates for the whole process, for the same reason: a
+    // limit counts what this process is carrying, and a swap must not hand
+    // out a second set of slots to a pool that is already full (ADR-0045).
+    let gates = Arc::new(crate::pool::Gates::new());
 
     let bindings = bindings(&live.load().config)?;
     let tcp_listeners = bindings.len();
@@ -153,6 +157,7 @@ pub fn build(link: AgentLink) -> Result<Server> {
                     Arc::clone(&live),
                     Arc::clone(&status),
                     Arc::clone(&balancer),
+                    Arc::clone(&gates),
                 );
                 let mut service = pingora::proxy::http_proxy_service_with_name(
                     &server.configuration,

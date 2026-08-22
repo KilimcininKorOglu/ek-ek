@@ -93,9 +93,28 @@ pub struct Member {
     hits: Arc<AtomicU64>,
     /// How many health probes it has answered.
     probes: Arc<AtomicU64>,
+    /// How many TCP connections it has accepted.
+    ///
+    /// Counted at accept rather than worked out from the request count, so a
+    /// test measures what really reached the operating system.
+    connections: Arc<AtomicU64>,
+    /// How many of those connections are still open.
+    open: Arc<AtomicU64>,
     /// Whether it is still answering at all.
     alive: Arc<AtomicBool>,
     accept: tokio::task::JoinHandle<()>,
+}
+
+/// Decrements a count when it is dropped.
+///
+/// Written as a guard rather than a line at the end of the task, because a
+/// connection ends on several paths and one of them is a return.
+struct Closing(Arc<AtomicU64>);
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Member {
@@ -125,6 +144,10 @@ impl Member {
 
         let hits = Arc::new(AtomicU64::new(0));
         let probes = Arc::new(AtomicU64::new(0));
+        let connections = Arc::new(AtomicU64::new(0));
+        let open = Arc::new(AtomicU64::new(0));
+        let accepted = Arc::clone(&connections);
+        let still_open = Arc::clone(&open);
         let alive = Arc::new(AtomicBool::new(true));
         let counted = Arc::clone(&hits);
         let probed = Arc::clone(&probes);
@@ -141,8 +164,15 @@ impl Member {
                 let probed = Arc::clone(&probed);
                 let answering = Arc::clone(&answering);
                 let own_cookie = own_cookie.clone();
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let held = Arc::clone(&still_open);
+                held.fetch_add(1, Ordering::SeqCst);
 
                 tokio::spawn(async move {
+                    // Decremented however the connection ends, so a test that
+                    // asks how many are open reads the operating system's
+                    // answer rather than an optimistic one.
+                    let _closing = Closing(held);
                     let (reader, mut writer) = stream.into_split();
                     let mut lines = BufReader::new(reader).lines();
 
@@ -246,6 +276,8 @@ impl Member {
             port,
             hits,
             probes,
+            connections,
+            open,
             alive,
             accept,
         }
@@ -280,6 +312,34 @@ impl Member {
     /// Forgets the count, so one test can measure two rounds separately.
     pub fn reset(&self) {
         self.hits.store(0, Ordering::SeqCst);
+        self.connections.store(0, Ordering::SeqCst);
+    }
+
+    /// How many TCP connections have reached it.
+    #[must_use]
+    pub fn connections(&self) -> u64 {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    /// How many of its connections are still open.
+    #[must_use]
+    pub fn open(&self) -> u64 {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    /// Waits until the open count settles at or below a number.
+    ///
+    /// A connection closes when the other side gets round to it, so reading
+    /// the count once would measure the scheduler rather than the proxy.
+    pub async fn wait_until_open_is_at_most(&self, most: u64) -> u64 {
+        for _ in 0..800 {
+            let open = self.open();
+            if open <= most {
+                return open;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        self.open()
     }
 
     /// How this member is written into a configuration.
@@ -363,6 +423,13 @@ pub struct Document {
     pub default_backend: String,
     /// The pool's stickiness, already rendered.
     pub stickiness: String,
+    /// Whether the `web` pool reuses backend connections.
+    pub connection_pooling: String,
+    /// How many requests the `web` pool carries at once, or zero for no
+    /// limit.
+    pub connection_pool_size: u32,
+    /// How long a pooled connection of the `web` pool may be reused.
+    pub connection_lifetime_seconds: u32,
     /// The frontend's TLS settings, already rendered, or `null`.
     pub tls: String,
     /// Certificates, already rendered.
@@ -410,6 +477,9 @@ impl Document {
             extra_pools: Vec::new(),
             default_backend: r#""web""#.to_owned(),
             stickiness: r#"{"mode":"disabled"}"#.to_owned(),
+            connection_pooling: "enabled".to_owned(),
+            connection_pool_size: 128,
+            connection_lifetime_seconds: 300,
             tls: "null".to_owned(),
             certificates: String::new(),
             material: Vec::new(),
@@ -549,11 +619,48 @@ impl Document {
 
     /// Adds a backend pool beyond the default `web` one.
     #[must_use]
-    pub fn pool(mut self, id: &str, members: Vec<String>) -> Self {
+    pub fn pool(self, id: &str, members: Vec<String>) -> Self {
+        self.pool_with(id, members, "enabled", 128, 300)
+    }
+
+    /// Adds a backend pool naming its own connection settings.
+    ///
+    /// Written out rather than defaulted, because the whole point of a
+    /// measurement here is that two pools under one frontend can differ.
+    #[must_use]
+    pub fn pool_with(
+        mut self,
+        id: &str,
+        members: Vec<String>,
+        pooling: &str,
+        size: u32,
+        lifetime_seconds: u32,
+    ) -> Self {
         self.extra_pools.push(format!(
-            r#"{{"id":"{id}","members":[{}],"algorithm":"round_robin","health_check":null,"stickiness":{{"mode":"disabled"}},"connection_pooling":"enabled"}}"#,
+            r#"{{"id":"{id}","members":[{}],"algorithm":"round_robin","health_check":null,"stickiness":{{"mode":"disabled"}},"connection_pooling":"{pooling}","connection_pool_size":{size},"connection_lifetime_seconds":{lifetime_seconds}}}"#,
             members.join(",")
         ));
+        self
+    }
+
+    /// Names whether the `web` pool reuses backend connections.
+    #[must_use]
+    pub fn connection_pooling(mut self, pooling: &str) -> Self {
+        self.connection_pooling = pooling.to_owned();
+        self
+    }
+
+    /// Names how many requests the `web` pool carries at once.
+    #[must_use]
+    pub const fn connection_pool_size(mut self, size: u32) -> Self {
+        self.connection_pool_size = size;
+        self
+    }
+
+    /// Names how long a pooled connection of the `web` pool may be reused.
+    #[must_use]
+    pub const fn connection_lifetime(mut self, seconds: u32) -> Self {
+        self.connection_lifetime_seconds = seconds;
         self
     }
 
@@ -698,11 +805,14 @@ impl Document {
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"{vip_address}","prefix_length":{prefix_length},"interface":"lo","preferred_node":"node1"}}],
 "frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
-"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"enabled"}}{extra_pools}],
+"backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"{connection_pooling}","connection_pool_size":{connection_pool_size},"connection_lifetime_seconds":{connection_lifetime_seconds}}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
 "stickiness_key":"{stickiness_key}","log_level":"{log_level}"}}"#,
             port = self.port,
+            connection_pooling = self.connection_pooling,
+            connection_pool_size = self.connection_pool_size,
+            connection_lifetime_seconds = self.connection_lifetime_seconds,
             vip_address = self.vip_address,
             log_level = self.log_level,
             access_log = if self.access_log.is_empty() {
@@ -874,6 +984,25 @@ impl Agent {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         None
+    }
+
+    /// Waits until the report accounts for this many backend connections.
+    ///
+    /// A status report goes out on a timer, so the first one to arrive can
+    /// predate the requests entirely. Reading it without waiting would
+    /// measure the timer rather than the traffic.
+    pub async fn wait_for_backend_connections(&self, total: u64) -> Report {
+        let mut last = None;
+        for _ in 0..300 {
+            if let Some(report) = self.last_report().await {
+                if report.backend_connections_opened + report.backend_connections_reused >= total {
+                    return report;
+                }
+                last = Some(report);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        last.expect("the traffic path reports its counters")
     }
 
     /// Waits until a member is reported with the health asked for.
@@ -2074,6 +2203,10 @@ pub struct Report {
     pub tls_handshakes_refused: u64,
     /// How many log records the queue had to throw away.
     pub log_records_dropped: u64,
+    /// Backend connections the process had to open.
+    pub backend_connections_opened: u64,
+    /// Requests served over a connection the pool already held.
+    pub backend_connections_reused: u64,
 }
 
 impl Report {
@@ -2090,6 +2223,12 @@ impl Report {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
             log_records_dropped: field(line, "log_records_dropped")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            backend_connections_opened: field(line, "backend_connections_opened")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            backend_connections_reused: field(line, "backend_connections_reused")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
         }

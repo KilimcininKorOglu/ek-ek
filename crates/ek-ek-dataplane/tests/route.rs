@@ -464,6 +464,7 @@ fn a_timeout_of_an_hour_reaches_the_upstream_it_governs() {
         2,
         decided.expect("a pool was chosen"),
         ConnectionPooling::Enabled,
+        0,
     )
     .expect("a peer must take its options");
 
@@ -483,6 +484,7 @@ fn a_timeout_of_zero_leaves_the_upstream_with_no_limit_at_all() {
         2,
         0,
         ConnectionPooling::Enabled,
+        0,
     )
     .expect("a peer must take its options");
 

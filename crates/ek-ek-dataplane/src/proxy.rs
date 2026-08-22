@@ -29,6 +29,7 @@ use pingora::upstreams::peer::Peer;
 use pingora::{Error, ErrorType};
 
 use crate::live::{Live, LiveConfig, Status};
+use crate::pool::{Gates, Slot};
 use crate::requestid;
 use crate::route::{Decision, decide};
 use crate::sticky::{self, Signer};
@@ -75,6 +76,11 @@ pub struct RequestContext {
     /// Decided from the same snapshot as everything else, so a configuration
     /// change never turns the log off halfway through a request.
     logged: bool,
+    /// The pool slot this request holds, released when the request ends.
+    ///
+    /// Held rather than read, so nothing has to remember to give it back:
+    /// the slot goes when the context does, on every path out (ADR-0045).
+    _slot: Option<Slot>,
 }
 
 /// Proxies one frontend.
@@ -90,6 +96,9 @@ pub struct Proxy {
     /// Requests this frontend has taken, which is what access log sampling
     /// counts against. Per frontend, because the setting is per frontend.
     seen: AtomicU64,
+    /// How many requests each backend pool may carry at once, shared with
+    /// every other frontend that sends to the same pool.
+    gates: Arc<Gates>,
 }
 
 impl Proxy {
@@ -100,6 +109,7 @@ impl Proxy {
         live: Arc<LiveConfig>,
         status: Arc<Status>,
         balancer: Arc<crate::balance::Balancer>,
+        gates: Arc<Gates>,
     ) -> Self {
         Self {
             frontend,
@@ -107,6 +117,7 @@ impl Proxy {
             status,
             balancer,
             seen: AtomicU64::new(0),
+            gates,
         }
     }
 
@@ -166,10 +177,16 @@ pub fn upstream(
     connect_timeout_seconds: u32,
     request_timeout_seconds: u32,
     pooling: ConnectionPooling,
+    reuse_group: u64,
 ) -> Option<HttpPeer> {
     // TLS to the backend arrives with M4. Until then the hop is plain and
     // the SNI is empty rather than guessed.
     let mut peer = HttpPeer::new(address, false, String::new());
+    // pingora will not share a connection between two peers whose group
+    // differs, so a group that counts elapsed time takes older connections
+    // out of use. This is what bounds a connection's life: pingora has no
+    // lifetime of its own, only an idle timeout.
+    peer.group_key = reuse_group;
     let options = peer.get_mut_peer_options()?;
 
     options.connection_timeout = Some(Duration::from_secs(u64::from(connect_timeout_seconds)));
@@ -276,6 +293,7 @@ impl ProxyHttp for Proxy {
             started: Instant::now(),
             request_id: String::new(),
             logged: false,
+            _slot: None,
         }
     }
 
@@ -358,6 +376,12 @@ impl ProxyHttp for Proxy {
             }
             return Ok(true);
         };
+        // Before a member is claimed, because a request that has to wait
+        // should not be counted against a member it may not reach for a
+        // while. Waiting rather than refusing: the limit is a queue
+        // (ADR-0045).
+        ctx._slot = crate::pool::slot(self.gates.gate(name, pool.connection_pool_size)).await;
+
         // Stickiness first: a client the pool has already answered goes back
         // to the same member, and only a client with no usable cookie is
         // distributed by the algorithm (ADR-0024).
@@ -413,6 +437,7 @@ impl ProxyHttp for Proxy {
             frontend.connect_timeout_seconds,
             request_limit,
             pool.connection_pooling,
+            crate::pool::reuse_group(pool),
         )
         .ok_or_else(|| Error::explain(ErrorType::InternalError, "peer has no options to set"))?;
 
@@ -430,6 +455,26 @@ impl ProxyHttp for Proxy {
         ctx.peer
             .clone()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "no peer was chosen"))
+    }
+
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        _fd: std::os::unix::io::RawFd,
+        _digest: Option<&pingora::protocols::Digest>,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        // pingora is what knows whether the connection came out of its pool,
+        // so the count is taken from it rather than worked out here. Counting
+        // our own opens would measure what we asked for, not what happened.
+        if reused {
+            self.status.backend_connection_reused();
+        } else {
+            self.status.backend_connection_opened();
+        }
+        Ok(())
     }
 
     async fn upstream_request_filter(

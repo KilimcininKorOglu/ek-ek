@@ -26,6 +26,7 @@ pub mod hashring;
 pub mod health;
 pub mod link;
 pub mod live;
+pub mod pool;
 pub mod probe;
 pub mod proxy;
 pub mod proxyproto;
