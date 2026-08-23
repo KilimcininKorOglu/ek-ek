@@ -356,15 +356,14 @@ fn listeners_follow_the_frontends() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, ListenerKind::Stream);
 
-    // TLS passthrough still has no listener: choosing a member needs the
-    // ClientHello read first, which arrives with M4.
+    // A passthrough frontend is a listener of its own kind. It shares the L4
+    // path, and the kind is what says the ClientHello is read first
+    // (ADR-0080), so it must not come back as a plain stream.
     let mut passthrough = config.clone();
     passthrough.frontends[0].application = ApplicationProtocol::TlsPassthrough;
-    assert!(
-        bindings(&passthrough)
-            .expect("the frontends resolve")
-            .is_empty()
-    );
+    let found = bindings(&passthrough).expect("the frontends resolve");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].kind, ListenerKind::TlsPassthrough);
 
     // A frontend naming a VIP that is not there is an error rather than a
     // listener nobody notices is missing.

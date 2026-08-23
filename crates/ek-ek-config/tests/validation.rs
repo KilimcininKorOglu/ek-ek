@@ -228,7 +228,7 @@ fn a_port_outside_the_valid_range_is_refused() {
 #[test]
 fn tls_settings_on_a_frontend_that_does_not_speak_http_are_refused() {
     let mut config = sample();
-    config.frontends[0].application = ApplicationProtocol::TlsPassthrough;
+    config.frontends[0].application = ApplicationProtocol::Raw;
 
     let found = faults(&config);
 
@@ -237,9 +237,74 @@ fn tls_settings_on_a_frontend_that_does_not_speak_http_are_refused() {
 
     // Dropping the settings rather than the protocol resolves it too.
     let mut config = sample();
+    config.frontends[0].application = ApplicationProtocol::Raw;
+    config.frontends[0].tls = None;
+    assert!(validate(&config).is_ok());
+}
+
+#[test]
+fn tls_settings_on_a_passthrough_frontend_are_refused_by_their_own_name() {
+    // Told apart from the raw case on purpose: the fix differs. A passthrough
+    // frontend never presents a certificate at all, and the operator who set
+    // one probably wanted TLS termination instead.
+    let mut config = sample();
+    config.frontends[0].application = ApplicationProtocol::TlsPassthrough;
+
+    let found = faults(&config);
+
+    assert_eq!(found.codes(), vec![ErrorCode::FrontendTlsOnPassthrough]);
+    assert_eq!(found.as_slice()[0].path.as_text(), "frontends[0].tls");
+    assert_eq!(
+        found.as_slice()[0].parameters.get("frontend"),
+        Some(&ParameterValue::Identifier("web-https".to_owned())),
+        "the error must name the frontend the operator has to open"
+    );
+
+    // Dropping the settings resolves it, and the same frontend then carries
+    // passthrough legally.
+    let mut config = sample();
     config.frontends[0].application = ApplicationProtocol::TlsPassthrough;
     config.frontends[0].tls = None;
     assert!(validate(&config).is_ok());
+}
+
+#[test]
+fn sni_rules_on_a_frontend_that_never_reads_a_client_hello_are_refused() {
+    // Nothing reads a ClientHello unless the frontend passes TLS through, so
+    // the rules would sit there matching nothing and taking no traffic.
+    let mut config = sample();
+    config.frontends[0].sni_rules = vec![ek_ek_config::SniRule {
+        sni_pattern: "posta.ornek.com".to_owned(),
+        backend: BackendId::new("web"),
+    }];
+
+    let found = faults(&config);
+
+    assert_eq!(
+        found.codes(),
+        vec![ErrorCode::FrontendSniRulesWithoutPassthrough]
+    );
+    assert_eq!(found.as_slice()[0].path.as_text(), "frontends[0].sni_rules");
+    assert_eq!(
+        found.as_slice()[0].parameters.get("rule_count"),
+        Some(&ParameterValue::Number(1)),
+        "the error must say how many rules are doing nothing"
+    );
+
+    // The same rules on a passthrough frontend are legal, so what is refused
+    // is the placement rather than the rules.
+    let mut config = sample();
+    config.frontends[0].sni_rules = vec![ek_ek_config::SniRule {
+        sni_pattern: "posta.ornek.com".to_owned(),
+        backend: BackendId::new("web"),
+    }];
+    config.frontends[0].application = ApplicationProtocol::TlsPassthrough;
+    config.frontends[0].tls = None;
+    assert!(
+        validate(&config).is_ok(),
+        "the rules themselves are not the fault: {:?}",
+        validate(&config).err().map(|errors| errors.codes())
+    );
 }
 
 #[test]

@@ -80,6 +80,14 @@ pub struct Access {
     /// UDP only: which session table entry was opened for it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// TLS passthrough only: the name the client asked for in its
+    /// ClientHello.
+    ///
+    /// It is what decided the pool, so a connection that went to the wrong
+    /// place has the reason in its own record (ADR-0080). Absent when the
+    /// client sent no name, which is a case of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 impl Access {
@@ -100,7 +108,15 @@ impl Access {
             bytes_to_backend: None,
             bytes_from_backend: None,
             session: None,
+            sni: None,
         }
+    }
+
+    /// Names what the client asked for in its ClientHello.
+    #[must_use]
+    pub fn with_sni(mut self, name: &str) -> Self {
+        self.sni = Some(name.to_owned());
+        self
     }
 
     /// Names where the traffic was sent.

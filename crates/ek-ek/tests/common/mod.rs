@@ -417,6 +417,8 @@ pub struct Document {
     pub health_check: String,
     /// Rules, already rendered.
     pub routing_rules: Vec<String>,
+    /// SNI rules, already rendered.
+    pub sni_rules: Vec<String>,
     /// Extra backend pools beyond `web`, already rendered.
     pub extra_pools: Vec<String>,
     /// Pool used when no rule matches, or nothing.
@@ -474,6 +476,7 @@ impl Document {
             idle_timeout_seconds: 0,
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
+            sni_rules: Vec::new(),
             extra_pools: Vec::new(),
             default_backend: r#""web""#.to_owned(),
             stickiness: r#"{"mode":"disabled"}"#.to_owned(),
@@ -743,6 +746,26 @@ impl Document {
         self
     }
 
+    /// Makes the frontend read the SNI name and pass the handshake through.
+    #[must_use]
+    pub fn passthrough(mut self) -> Self {
+        self.application = "tls_passthrough".to_owned();
+        self
+    }
+
+    /// Sends connections asking for a matching name to the pool named.
+    ///
+    /// Order is kept, because the first rule that covers a name wins and a
+    /// measurement of that needs two rules one of which could take the other's
+    /// connections.
+    #[must_use]
+    pub fn sni_rule(mut self, pattern: &str, backend: &str) -> Self {
+        self.sni_rules.push(format!(
+            r#"{{"sni_pattern":"{pattern}","backend":"{backend}"}}"#
+        ));
+        self
+    }
+
     /// Makes the frontend a UDP listener.
     #[must_use]
     pub fn udp(mut self) -> Self {
@@ -804,7 +827,7 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"{vip_address}","prefix_length":{prefix_length},"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[{sni_rules}],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"{connection_pooling}","connection_pool_size":{connection_pool_size},"connection_lifetime_seconds":{connection_lifetime_seconds}}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
@@ -833,6 +856,7 @@ impl Document {
             drain = self.drain_timeout_seconds,
             idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
+            sni_rules = self.sni_rules.join(","),
             extra_pools = self
                 .extra_pools
                 .iter()

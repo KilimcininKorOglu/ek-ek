@@ -26,6 +26,8 @@
   "config.frontend.certificate_expired": "Frontend '{frontend}' offers certificate '{certificate}', which expired on {not_after_unix}. Every handshake that picks it fails.",
   "config.frontend.duplicate_binding": "Port {port} on '{vip}' is already taken by frontend '{conflicting_frontend}'.",
   "config.frontend.redirect_without_http": "Frontend '{frontend}' has a redirect rule but does not speak HTTP, so it cannot answer one.",
+  "config.frontend.sni_rules_without_passthrough": "Frontend '{frontend}' carries {rule_count} SNI rule(s) but does not pass TLS through, so nothing ever reads a ClientHello to match them against.",
+  "config.frontend.tls_on_passthrough": "Frontend '{frontend}' passes TLS through, so it never opens the handshake and never presents a certificate. Set its application to HTTP to terminate TLS instead.",
   "config.frontend.tls_without_http": "Frontend '{frontend}' carries TLS settings but does not speak HTTP.",
   "config.frontend.unknown_backend": "Frontend '{frontend}' names backend '{backend}', which is not defined.",
   "config.frontend.unknown_certificate": "Frontend '{frontend}' names certificate '{certificate}', which is not defined.",

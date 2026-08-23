@@ -63,6 +63,9 @@ pub enum ListenerKind {
     Http,
     /// Forwarded byte for byte, without being interpreted.
     Stream,
+    /// The ClientHello's server name is read, and the handshake is then
+    /// forwarded untouched (ADR-0027).
+    TlsPassthrough,
 }
 
 /// Works out what a configuration says to listen on.
@@ -81,12 +84,10 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
         if frontend.transport != TransportProtocol::Tcp {
             continue;
         }
-        // TLS passthrough needs the ClientHello read before a member is
-        // chosen, which arrives with M4. It has no listener until then.
         let kind = match frontend.application {
             ApplicationProtocol::Http => ListenerKind::Http,
             ApplicationProtocol::Raw => ListenerKind::Stream,
-            ApplicationProtocol::TlsPassthrough => continue,
+            ApplicationProtocol::TlsPassthrough => ListenerKind::TlsPassthrough,
         };
 
         let vip = config
@@ -202,8 +203,17 @@ pub fn build(link: AgentLink) -> Result<Server> {
                 }
                 server.add_service(service);
             }
-            ListenerKind::Stream => {
-                let proxy = StreamProxy::new(
+            ListenerKind::Stream | ListenerKind::TlsPassthrough => {
+                // One path for both. The only difference is whether the name
+                // is read before a pool is chosen; the copying, the PROXY
+                // header, the idle limit and the access record are the same
+                // thing and stay in one place (ADR-0080).
+                let build = if binding.kind == ListenerKind::TlsPassthrough {
+                    StreamProxy::passthrough
+                } else {
+                    StreamProxy::new
+                };
+                let proxy = build(
                     binding.frontend.clone(),
                     Arc::clone(&live),
                     Arc::clone(&status),

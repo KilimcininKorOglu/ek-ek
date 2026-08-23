@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ek_ek_config::{Config, ProxyProtocol};
+use ek_ek_config::{BackendId, ProxyProtocol};
 use pingora::apps::ServerApp;
 use pingora::protocols::Stream;
 use pingora::server::ShutdownWatch;
@@ -36,7 +36,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::balance::Balancer;
-use crate::live::{Live, LiveConfig, Status};
+use crate::clienthello::{MOST_HELLO_BYTES, Outcome};
+use crate::live::{Live, LiveConfig, Refusal, Status};
 use crate::proxy::elapsed_ms;
 use crate::proxyproto;
 use crate::requestid;
@@ -47,10 +48,24 @@ use crate::requestid;
 /// small enough that a mostly idle connection does not hold it for nothing.
 const CHUNK: usize = 16 * 1024;
 
+/// How long a passthrough connection is given to send its ClientHello.
+///
+/// A ClientHello is the first thing a TLS client sends and it arrives at once.
+/// Five seconds is generous for a loaded network and short enough that a
+/// connection which will never complete one costs a socket rather than a
+/// morning. Not configurable: raising it is a resource hole an operator would
+/// open without seeing it (ADR-0080).
+pub const HELLO_PATIENCE: Duration = Duration::from_secs(5);
+
 /// Proxies one L4 frontend.
 pub struct StreamProxy {
     /// Which frontend this serves.
     frontend: String,
+    /// Whether the SNI name is read before a pool is chosen.
+    ///
+    /// A passthrough frontend reads it; a raw one has nothing to read, because
+    /// the bytes on it are not TLS and must not be treated as if they were.
+    passthrough: bool,
     /// The live configuration, shared with every other frontend.
     live: Arc<LiveConfig>,
     /// Counters reported to the agent.
@@ -90,10 +105,25 @@ impl StreamProxy {
     ) -> Self {
         Self {
             frontend,
+            passthrough: false,
             live,
             status,
             balancer,
             seen: AtomicU64::new(0),
+        }
+    }
+
+    /// Builds a proxy that reads the SNI name before it chooses a pool.
+    #[must_use]
+    pub fn passthrough(
+        frontend: String,
+        live: Arc<LiveConfig>,
+        status: Arc<Status>,
+        balancer: Arc<Balancer>,
+    ) -> Self {
+        Self {
+            passthrough: true,
+            ..Self::new(frontend, live, status, balancer)
         }
     }
 
@@ -103,15 +133,27 @@ impl StreamProxy {
     /// needs afterwards comes out of the value returned here, so a
     /// configuration change never moves a connection that is already up
     /// (ADR-0009).
-    fn route(&self, live: &Live, client: IpAddr) -> Option<Routed> {
+    ///
+    /// `asked_for` is the name out of the ClientHello on a passthrough
+    /// frontend, and nothing on a raw one.
+    fn route(&self, live: &Live, client: IpAddr, asked_for: Option<&str>) -> Option<Routed> {
         let frontend = live
             .config
             .frontends
             .iter()
             .find(|frontend| frontend.id.as_str() == self.frontend)?;
-        // An L4 frontend routes to one pool. Host and path do not exist here,
-        // so there is nothing for a routing rule to match on.
-        let name = frontend.default_backend.as_ref()?.as_str();
+        // The first SNI rule that covers the name wins, and the default pool
+        // takes everything else: a name nothing matched, and a client that
+        // sent no name at all (ADR-0027).
+        let name = asked_for
+            .and_then(|asked_for| {
+                frontend
+                    .sni_rules
+                    .iter()
+                    .find(|rule| crate::route::host_matches(&rule.sni_pattern, asked_for))
+                    .map(|rule| rule.backend.as_str())
+            })
+            .or_else(|| frontend.default_backend.as_ref().map(BackendId::as_str))?;
         let pool = live
             .config
             .backends
@@ -291,13 +333,70 @@ pub fn announce(
     Some(header.bytes().to_vec())
 }
 
-/// Whether a configuration says this frontend is an L4 listener.
-#[must_use]
-pub fn is_stream_frontend(config: &Config, frontend: &str) -> bool {
-    config.frontends.iter().any(|candidate| {
-        candidate.id.as_str() == frontend
-            && candidate.application == ek_ek_config::ApplicationProtocol::Raw
-    })
+/// What a passthrough connection said before anything was forwarded.
+pub struct Opening {
+    /// The name the client asked for, when it sent one.
+    pub asked_for: Option<String>,
+    /// Everything read while waiting, which the backend still has to receive.
+    pub read: Vec<u8>,
+}
+
+/// Reads until the ClientHello is complete, or gives up.
+///
+/// Every byte read is kept: the backend is the one terminating the handshake,
+/// so what was consumed here has to reach it, in order and in full, before
+/// anything else (ADR-0080).
+///
+/// # Errors
+///
+/// Returns why the connection cannot be routed. Nothing has been forwarded at
+/// that point, so closing leaves no half-open session behind.
+pub async fn opening(client: &mut Stream) -> Result<Opening, Refusal> {
+    let deadline = Instant::now() + HELLO_PATIENCE;
+    let mut read: Vec<u8> = Vec::new();
+    let mut chunk = vec![0_u8; 4096];
+
+    loop {
+        match crate::clienthello::read(&read) {
+            Outcome::Named(name) => {
+                return Ok(Opening {
+                    asked_for: Some(name),
+                    read,
+                });
+            }
+            Outcome::Nameless => {
+                return Ok(Opening {
+                    asked_for: None,
+                    read,
+                });
+            }
+            Outcome::NotAHandshake => return Err(Refusal::NotAHandshake),
+            Outcome::More => {}
+        }
+
+        // Checked before the next read rather than after it, so the buffer
+        // never grows past the limit even by one chunk.
+        if read.len() >= MOST_HELLO_BYTES {
+            return Err(Refusal::HelloNeverArrived);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Refusal::HelloNeverArrived);
+        }
+
+        let taken = match tokio::time::timeout(left, client.read(&mut chunk)).await {
+            Ok(Ok(0)) => {
+                // The client went away without finishing. There is nothing to
+                // route and nothing to close on the other side.
+                return Err(Refusal::HelloNeverArrived);
+            }
+            Ok(Ok(taken)) => taken,
+            // A read fault and a wait that ran out both end the same way: no
+            // name, and nothing forwarded.
+            Ok(Err(_)) | Err(_) => return Err(Refusal::HelloNeverArrived),
+        };
+        read.extend_from_slice(&chunk[..taken]);
+    }
 }
 
 #[async_trait]
@@ -317,7 +416,33 @@ impl ServerApp for StreamProxy {
 
         let address = client_address(&client);
 
-        let Some(routed) = self.route(&live, address) else {
+        // On a passthrough frontend the name decides the pool, so it has to be
+        // read before anything else happens. The handshake itself is never
+        // opened: a client certificate has to reach the backend untouched
+        // (ADR-0027).
+        let mut opened = None;
+        if self.passthrough {
+            match opening(&mut client).await {
+                Ok(held) => opened = Some(held),
+                Err(reason) => {
+                    self.status.passthrough_refused(&self.frontend, reason);
+                    return None;
+                }
+            }
+        }
+        let asked_for = opened
+            .as_ref()
+            .and_then(|held| held.asked_for.as_deref())
+            .map(str::to_owned);
+
+        let Some(routed) = self.route(&live, address, asked_for.as_deref()) else {
+            if self.passthrough {
+                // Named rather than closed quietly: this is a configuration
+                // an operator can fix, and nothing else says the connection
+                // was turned away.
+                self.status
+                    .passthrough_refused(&self.frontend, Refusal::NoPool);
+            }
             // Nowhere to send it. There is no status line to answer with on a
             // raw connection, so closing is the only thing left; what matters
             // is that it is closed here rather than left hanging.
@@ -355,6 +480,17 @@ impl ServerApp for StreamProxy {
             return None;
         }
 
+        // The ClientHello was read to decide where this goes, and the backend
+        // is the one that terminates the handshake. It has to arrive there
+        // first and whole, or the handshake never starts.
+        if let Some(held) = &opened
+            && !held.read.is_empty()
+            && (backend.write_all(&held.read).await.is_err() || backend.flush().await.is_err())
+        {
+            self.status.backend_connect_failed();
+            return None;
+        }
+
         let counted = Counted::open(&self.balancer, &self.frontend, &routed.pool, &routed.member);
         let moved = couple(&mut client, &mut backend, routed.idle_timeout).await;
         drop(counted);
@@ -363,17 +499,26 @@ impl ServerApp for StreamProxy {
             let (to_backend, from_backend) = moved.unwrap_or((0, 0));
             let client =
                 ends(&client).map_or_else(|| address.to_string(), |(peer, _)| peer.to_string());
-            ek_ek_log::access(
-                &ek_ek_log::Access::new(
-                    ek_ek_log::Protocol::Tcp,
-                    &self.frontend,
-                    &client,
-                    elapsed_ms(started),
-                )
-                .with_request_id(&request_id)
-                .to_backend(&routed.pool, &routed.member)
-                .tcp(to_backend, from_backend),
+            let mut record = ek_ek_log::Access::new(
+                ek_ek_log::Protocol::Tcp,
+                &self.frontend,
+                &client,
+                elapsed_ms(started),
+            )
+            .with_request_id(&request_id)
+            .to_backend(&routed.pool, &routed.member)
+            // The bytes the ClientHello took are counted with the rest: they
+            // crossed to the backend like everything else did.
+            .tcp(
+                to_backend + opened.as_ref().map_or(0, |held| held.read.len() as u64),
+                from_backend,
             );
+            // Why this connection went where it did. Without it a wrong pool
+            // is a fault with nothing in the record to explain it.
+            if let Some(name) = &asked_for {
+                record = record.with_sni(name);
+            }
+            ek_ek_log::access(&record);
         }
 
         // Never reused: this connection carried an opaque protocol and there

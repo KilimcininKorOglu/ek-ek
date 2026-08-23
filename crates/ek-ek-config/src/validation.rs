@@ -61,6 +61,14 @@ pub enum ErrorCode {
     /// A frontend redirects without speaking HTTP, where it cannot answer.
     #[serde(rename = "config.frontend.redirect_without_http")]
     FrontendRedirectWithoutHttp,
+    /// A frontend carries SNI rules without passing TLS through, where
+    /// nothing ever reads a ClientHello to match them against.
+    #[serde(rename = "config.frontend.sni_rules_without_passthrough")]
+    FrontendSniRulesWithoutPassthrough,
+    /// A TLS passthrough frontend carries certificates, which it never
+    /// presents because it never opens the handshake.
+    #[serde(rename = "config.frontend.tls_on_passthrough")]
+    FrontendTlsOnPassthrough,
     /// A VIP still has frontends bound to it.
     #[serde(rename = "config.vip.in_use")]
     VipInUse,
@@ -134,7 +142,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 34] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -144,6 +152,8 @@ impl ErrorCode {
         Self::FrontendAccessLogSampleZero,
         Self::FrontendTlsWithoutHttp,
         Self::FrontendRedirectWithoutHttp,
+        Self::FrontendSniRulesWithoutPassthrough,
+        Self::FrontendTlsOnPassthrough,
         Self::VipInUse,
         Self::VipUnknownPreferredNode,
         Self::VipTooMany,
@@ -184,6 +194,10 @@ impl ErrorCode {
             Self::FrontendAccessLogSampleZero => "config.frontend.access_log_sample_zero",
             Self::FrontendTlsWithoutHttp => "config.frontend.tls_without_http",
             Self::FrontendRedirectWithoutHttp => "config.frontend.redirect_without_http",
+            Self::FrontendSniRulesWithoutPassthrough => {
+                "config.frontend.sni_rules_without_passthrough"
+            }
+            Self::FrontendTlsOnPassthrough => "config.frontend.tls_on_passthrough",
             Self::VipInUse => "config.vip.in_use",
             Self::VipUnknownPreferredNode => "config.vip.unknown_preferred_node",
             Self::VipTooMany => "config.vip.too_many",
@@ -721,15 +735,50 @@ fn check_frontend_references(config: &Config, errors: &mut Vec<ValidationError>)
     }
 }
 
+/// Checks that TLS settings and SNI rules sit where something reads them.
+///
+/// Both are settings an operator writes and expects to work. A setting that is
+/// silently ignored is worse than one that is refused, because the operator
+/// goes on believing it is in force (ADR-0080).
 fn check_tls_placement(config: &Config, errors: &mut Vec<ValidationError>) {
     for (at, frontend) in config.frontends.iter().enumerate() {
-        if frontend.tls.is_some() && frontend.application != ApplicationProtocol::Http {
+        let here = || FieldPath::root().field("frontends").index(at);
+
+        // Two reasons, told apart, because they call for different fixes. On
+        // a passthrough frontend the certificate is never presented, and the
+        // operator probably wanted `http` with TLS termination instead. On a
+        // raw one nothing about the bytes is interpreted at all.
+        match frontend.application {
+            ApplicationProtocol::TlsPassthrough if frontend.tls.is_some() => {
+                errors.push(
+                    ValidationError::new(ErrorCode::FrontendTlsOnPassthrough, here().field("tls"))
+                        .with_id("frontend", frontend.id.as_str()),
+                );
+            }
+            ApplicationProtocol::Raw if frontend.tls.is_some() => {
+                errors.push(
+                    ValidationError::new(ErrorCode::FrontendTlsWithoutHttp, here().field("tls"))
+                        .with_id("frontend", frontend.id.as_str()),
+                );
+            }
+            _ => {}
+        }
+
+        // An SNI rule is matched against a ClientHello, and only a
+        // passthrough frontend ever reads one.
+        if !frontend.sni_rules.is_empty()
+            && frontend.application != ApplicationProtocol::TlsPassthrough
+        {
             errors.push(
                 ValidationError::new(
-                    ErrorCode::FrontendTlsWithoutHttp,
-                    FieldPath::root().field("frontends").index(at).field("tls"),
+                    ErrorCode::FrontendSniRulesWithoutPassthrough,
+                    here().field("sni_rules"),
                 )
-                .with_id("frontend", frontend.id.as_str()),
+                .with_id("frontend", frontend.id.as_str())
+                .with_number(
+                    "rule_count",
+                    i64::try_from(frontend.sni_rules.len()).unwrap_or(i64::MAX),
+                ),
             );
         }
     }

@@ -130,6 +130,33 @@ impl LiveConfig {
     }
 }
 
+/// Why a passthrough connection was turned away.
+///
+/// One counter covers all three, and this is what names the reason in the log
+/// beside it (ADR-0080).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// No SNI rule matched and the frontend names no default pool.
+    NoPool,
+    /// The ClientHello never arrived in full, within the time or the bytes it
+    /// is given.
+    HelloNeverArrived,
+    /// The first bytes were not a TLS handshake.
+    NotAHandshake,
+}
+
+impl Refusal {
+    /// A short reason, safe to write to a log.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NoPool => "no SNI rule matched it and the frontend names no default pool",
+            Self::HelloNeverArrived => "the ClientHello never arrived in full",
+            Self::NotAHandshake => "what it sent first was not a TLS handshake",
+        }
+    }
+}
+
 /// What this process reports about itself.
 #[derive(Debug, Default)]
 pub struct Status {
@@ -139,6 +166,7 @@ pub struct Status {
     configs_rejected: AtomicU64,
     backend_connect_failures: AtomicU64,
     tls_handshakes_refused: AtomicU64,
+    passthrough_connections_refused: AtomicU64,
     proxy_headers_without_an_address: AtomicU64,
     backend_connections_opened: AtomicU64,
     backend_connections_reused: AtomicU64,
@@ -260,6 +288,26 @@ impl Status {
         self.tls_handshakes_refused.load(Ordering::Relaxed)
     }
 
+    /// Records a passthrough connection turned away, and says why in the log.
+    ///
+    /// The reason travels in the log rather than in a counter of its own: an
+    /// operator watches one number and then asks why, and two questions are
+    /// answered in two places (ADR-0080).
+    pub fn passthrough_refused(&self, frontend: &str, reason: Refusal) {
+        self.passthrough_connections_refused
+            .fetch_add(1, Ordering::Relaxed);
+        log::warn!(
+            "passthrough frontend {frontend} closed a connection: {}",
+            reason.reason()
+        );
+    }
+
+    /// Returns how many passthrough connections have been turned away.
+    #[must_use]
+    pub fn passthrough_connections_refused(&self) -> u64 {
+        self.passthrough_connections_refused.load(Ordering::Relaxed)
+    }
+
     /// Counts one PROXY header that had to be sent without an address in it
     /// (ADR-0043).
     pub fn proxy_header_without_an_address(&self) {
@@ -300,6 +348,9 @@ impl Status {
             backend_connect_failures: self.backend_connect_failures.load(Ordering::Relaxed),
             udp_sessions_evicted: self.udp_evicted(),
             tls_handshakes_refused: self.tls_handshakes_refused.load(Ordering::Relaxed),
+            passthrough_connections_refused: self
+                .passthrough_connections_refused
+                .load(Ordering::Relaxed),
             proxy_headers_without_an_address: self
                 .proxy_headers_without_an_address
                 .load(Ordering::Relaxed),

@@ -21,6 +21,7 @@
 pub mod balance;
 pub mod certs;
 pub mod challenge;
+pub mod clienthello;
 pub mod error;
 pub mod handshake;
 pub mod hashring;

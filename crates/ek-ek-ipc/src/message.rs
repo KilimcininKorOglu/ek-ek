@@ -169,6 +169,16 @@ pub struct Counters {
     /// climbing is how an operator learns the log has a gap in it.
     #[serde(default)]
     pub log_records_dropped: u64,
+    /// Passthrough connections turned away before anything was forwarded
+    /// (ADR-0080).
+    ///
+    /// Three things end here: no SNI rule matched and the frontend names no
+    /// default pool, the ClientHello never arrived in full, and the first
+    /// bytes were not a handshake at all. The reason is named in a log record
+    /// each time; this is the number an operator watches. A refusal nobody
+    /// counts is an outage nobody can explain.
+    #[serde(default)]
+    pub passthrough_connections_refused: u64,
     /// Backend connections this process had to open.
     #[serde(default)]
     pub backend_connections_opened: u64,

@@ -56,6 +56,7 @@ fn a_message_survives_a_round_trip() {
             configs_rejected: 1,
             backend_connect_failures: 3,
             tls_handshakes_refused: 4,
+            passthrough_connections_refused: 12,
             udp_sessions_evicted: 9,
             proxy_headers_without_an_address: 6,
             log_records_dropped: 8,
