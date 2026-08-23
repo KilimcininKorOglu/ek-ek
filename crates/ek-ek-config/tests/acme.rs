@@ -98,7 +98,7 @@ fn an_acme_certificate_without_a_server_is_named() {
     );
     assert_eq!(codes(&config), vec![WarningCode::AcmeMissing]);
     assert!(
-        inspect(&config)
+        inspect(&config, 1_800_000_000)
             .iter()
             .any(|warning| warning.code == WarningCode::AcmeMissing),
         "the fault has to reach the operator through the normal inspection"

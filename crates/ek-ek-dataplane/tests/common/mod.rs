@@ -105,6 +105,7 @@ pub fn config(members: u16) -> Config {
         acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 

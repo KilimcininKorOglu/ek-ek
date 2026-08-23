@@ -54,6 +54,7 @@ fn cluster(nodes: Vec<Node>, vips: Vec<Vip>) -> Config {
         acme: None,
         stickiness_key: String::new(),
         log_level: ek_ek_config::LogLevel::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 

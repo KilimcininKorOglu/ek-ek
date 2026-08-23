@@ -20,7 +20,8 @@ use ek_ek_config::{
     TransportProtocol, Vip, VipId,
 };
 use ek_ek_dataplane::certs::{Certificates, LoadFailure, Loaded};
-use ek_ek_ipc::CertificateMaterial;
+use ek_ek_dataplane::live::LiveConfig;
+use ek_ek_ipc::{CertificateMaterial, ConfigUpdate};
 use openssl::asn1::Asn1Time;
 use openssl::bn::{BigNum, MsbOption};
 use openssl::ec::{EcGroup, EcKey};
@@ -155,6 +156,7 @@ fn document(offers: &[&str], default: Option<&str>, certificates: Vec<Certificat
         acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 
@@ -542,4 +544,79 @@ fn a_frontend_that_terminates_no_tls_holds_no_certificates() {
 
     assert_eq!(set.count("web"), 0);
     assert_eq!(served(&set, Some("one.example.test")), None);
+}
+
+/// One delivery of a configuration with one certificate's material in it.
+fn delivery(
+    generation: u64,
+    config: &Config,
+    id: &str,
+    material: CertificateMaterial,
+) -> ConfigUpdate {
+    ConfigUpdate {
+        generation,
+        config: config.clone(),
+        certificates: BTreeMap::from([(CertificateId::new(id), material)]),
+        challenges: BTreeMap::new(),
+    }
+}
+
+/// The fingerprint of the leaf a handshake for `name` would be given.
+fn fingerprint(live: &LiveConfig, name: &str) -> Vec<u8> {
+    live.load()
+        .certificates
+        .choose("web", Some(name))
+        .expect("a certificate is offered for this name")
+        .leaf()
+        .digest(openssl::hash::MessageDigest::sha256())
+        .expect("a digest")
+        .to_vec()
+}
+
+#[test]
+fn a_renewed_certificate_is_served_without_replacing_the_process() {
+    // What renewal depends on. The certificate is picked per handshake from
+    // the live set, and the live set is swapped whole with the configuration
+    // it belongs to, so a new certificate reaches clients the moment it is
+    // delivered (ADR-0068, ADR-0079).
+    let config = document(
+        &["web-cert"],
+        Some("web-cert"),
+        vec![certificate("web-cert", &["one.example.test"])],
+    );
+
+    let live = LiveConfig::new(delivery(1, &config, "web-cert", material("one")));
+    let before = fingerprint(&live, "one.example.test");
+
+    // The same identity, the same names, new material. This is exactly what a
+    // renewal produces.
+    live.apply(delivery(2, &config, "web-cert", material("one")))
+        .expect("the delivery is valid");
+    let after = fingerprint(&live, "one.example.test");
+
+    assert_eq!(live.generation(), 2, "the delivery did not land");
+    assert_ne!(
+        before, after,
+        "the handshake is still being given the certificate that was replaced"
+    );
+}
+
+#[test]
+fn a_delivery_that_changes_nothing_leaves_the_same_certificate_in_place() {
+    // The other side. A swap that produced a different leaf every time would
+    // make the measurement above pass whatever the product did.
+    let config = document(
+        &["web-cert"],
+        Some("web-cert"),
+        vec![certificate("web-cert", &["one.example.test"])],
+    );
+    let held = material("one");
+
+    let live = LiveConfig::new(delivery(1, &config, "web-cert", held.clone()));
+    let before = fingerprint(&live, "one.example.test");
+
+    live.apply(delivery(2, &config, "web-cert", held))
+        .expect("the delivery is valid");
+
+    assert_eq!(before, fingerprint(&live, "one.example.test"));
 }

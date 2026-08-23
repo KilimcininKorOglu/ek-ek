@@ -8,7 +8,7 @@
 //! frontend that answers no handshake, and material nobody references is a
 //! private key kept for no reason.
 
-use ek_ek_config::{Certificate, CertificateId, CertificateSource, SecretId};
+use ek_ek_config::{Certificate, CertificateId, CertificateSource, Config, SecretId};
 use ek_ek_store::Snapshot;
 
 use crate::inspect::Upload;
@@ -82,6 +82,39 @@ pub fn install(
     }
     next.secrets.insert(chain_id(id), chain);
     next.secrets.insert(key_id(id), key);
+    next
+}
+
+/// A document with what has already been obtained carried into it.
+///
+/// Two things know about a certificate and neither knows all of it. The
+/// document says which certificates exist, which names they cover and how they
+/// are obtained; an operator writes it and it is the authority on all three.
+/// What an order produced (the validity window and the two references to the
+/// material) exists only after an order, so only the store has it.
+///
+/// Without this, replacing the stored configuration with the document would
+/// throw that away, and renewal would then see every certificate as one that
+/// has never been obtained and order all of them on every run (ADR-0079).
+///
+/// The names are not part of the decision: a document that changes which names
+/// a certificate covers keeps the material it already has, which is the same
+/// thing the traffic path does with it.
+#[must_use]
+pub fn carry_obtained(document: &Config, stored: &Config) -> Config {
+    let mut next = document.clone();
+    for certificate in &mut next.certificates {
+        let Some(held) = stored
+            .certificates
+            .iter()
+            .find(|held| held.id == certificate.id)
+        else {
+            continue;
+        };
+        certificate.validity = held.validity;
+        certificate.chain.clone_from(&held.chain);
+        certificate.private_key.clone_from(&held.private_key);
+    }
     next
 }
 

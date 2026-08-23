@@ -27,6 +27,9 @@ const CHALLENGE_FILE: &str = "/tmp/ek-ek-challenges.json";
 const SOCKET: &str = "/tmp/ek-ek-agent.sock";
 /// The configuration document the order and the traffic path both work from.
 const CONFIG: &str = "/tmp/ek-ek-acme.json";
+/// The same document with the server's terms left unaccepted, which is what
+/// makes an order fail without anything being sent anywhere.
+const REFUSING_CONFIG: &str = "/tmp/ek-ek-acme-refusing.json";
 /// The certificate this measurement orders.
 const CERTIFICATE: &str = "cert-lab";
 
@@ -132,7 +135,7 @@ fn clean(node: &Node) {
     let _ = node.kill_matching("data-plane");
     let cleared = node
         .shell(&format!(
-            "rm -f {CHALLENGE_FILE} {SOCKET} {CONFIG} /var/lib/ek-ek/config.db* /var/lib/ek-ek/master.key"
+            "rm -f {CHALLENGE_FILE} {SOCKET} {CONFIG} {REFUSING_CONFIG} /var/lib/ek-ek/renewal-state.json /var/lib/ek-ek/config.db* /var/lib/ek-ek/master.key"
         ))
         .expect("the node should be reachable");
     assert!(cleared.ok(), "the node was not cleared: {}", cleared.stderr);
@@ -317,6 +320,193 @@ fn a_certificate_is_obtained_from_a_real_acme_server_and_stored_sealed() {
         "0",
         "the certificate record did not reach the store, so the check above measured nothing"
     );
+}
+
+#[test]
+fn a_certificate_is_renewed_against_the_real_server_only_once_it_is_running_out() {
+    let cluster = Cluster::start().expect("cluster should start");
+    cluster.reset().expect("the cluster should start clean");
+    let product = cluster
+        .install_binary("ek-ek", "ek-ek")
+        .expect("the product binary should build");
+    let agent_binary = cluster
+        .install_binary("ek-ek-itest", "ek-ek-standin-agent")
+        .expect("the stand-in agent should build");
+
+    let node = cluster.node("node1").expect("node1 is in the cluster");
+    clean(node);
+
+    let root = cluster
+        .pebble_root()
+        .expect("the ACME server's own authority should be readable");
+    let backend = cluster
+        .backend_address("backend1")
+        .expect("backend1 is in the cluster");
+    write(node, CONFIG, &one_line(&document(node, backend, &root, 80)));
+    let (_agent, _plane) = start(node, &agent_binary, &product, 80);
+
+    let ordered = node
+        .run(&[
+            &product,
+            "acme",
+            "--config",
+            CONFIG,
+            "--data-dir",
+            "/var/lib/ek-ek",
+            "--certificate",
+            CERTIFICATE,
+            "--challenges",
+            CHALLENGE_FILE,
+        ])
+        .expect("the order command should run");
+    assert!(
+        ordered.ok(),
+        "the first order did not complete\n{}\n{}",
+        ordered.stdout,
+        cluster.pebble_log(60).unwrap_or_default()
+    );
+
+    // A certificate that was just issued is not renewed. This also measures
+    // that what the order produced survived: the document carries no validity
+    // window, so a sweep reading it alone would order again immediately.
+    let early = renew(node, &product, None);
+    assert!(
+        early.ok(),
+        "the sweep failed\n{}\n{}",
+        early.stdout,
+        early.stderr
+    );
+    assert!(
+        !early.stdout.contains(r#""event":"renewing""#),
+        "a certificate issued seconds ago was ordered again: {}",
+        early.stdout
+    );
+    assert!(
+        early.stdout.contains(r#""renewed":0,"failed":0"#),
+        "{}",
+        early.stdout
+    );
+
+    // Ten years on, the window has gone whatever the server issued. The first
+    // sweep works from a document nobody accepted the server's terms in, so
+    // the order is refused before anything is sent and a failure is recorded.
+    let at = seconds_now() + 10 * 365 * 86_400;
+    write(
+        node,
+        REFUSING_CONFIG,
+        &one_line(&document(node, backend, &root, 80))
+            .replace(r#""accepted_terms": true"#, r#""accepted_terms": false"#),
+    );
+    let refused = renew_with(node, &product, REFUSING_CONFIG, Some(at));
+    assert!(
+        !refused.ok(),
+        "a sweep that renewed nothing reported success: {}",
+        refused.stdout
+    );
+    assert!(
+        refused
+            .stdout
+            .contains(r#""event":"renewal_failed","certificate":"cert-lab""#),
+        "{}",
+        refused.stdout
+    );
+    let after_failure = node
+        .shell("cat /var/lib/ek-ek/renewal-state.json")
+        .expect("the node should be readable");
+    assert!(
+        after_failure.stdout.contains(r#""failures":1"#),
+        "the failure was not written down: {}",
+        after_failure.stdout
+    );
+
+    // An hour later, with the terms accepted, the same certificate is renewed.
+    let late = renew(node, &product, Some(at + 3_600));
+    let report = format!(
+        "stdout:\n{}\nstderr:\n{}\npebble:\n{}",
+        late.stdout,
+        late.stderr,
+        cluster.pebble_log(80).unwrap_or_default()
+    );
+    assert!(late.ok(), "the renewal did not complete\n{report}");
+    assert!(
+        late.stdout.contains(&format!(
+            r#""event":"renewing","certificate":"{CERTIFICATE}""#
+        )),
+        "nothing was ordered again\n{report}"
+    );
+    for event in [
+        r#""event":"obtained""#,
+        r#""event":"stored""#,
+        r#""event":"usable""#,
+        r#""event":"renewed""#,
+    ] {
+        assert!(
+            late.stdout.contains(event),
+            "{event} is missing, so the renewal did not reach a certificate\n{report}"
+        );
+    }
+    assert!(
+        late.stdout.contains(r#""renewed":1,"failed":0"#),
+        "{report}"
+    );
+
+    // A renewal that worked leaves no record behind, so a certificate that has
+    // recovered reads the same as one that never failed.
+    let held = node
+        .shell("cat /var/lib/ek-ek/renewal-state.json")
+        .expect("the node should be readable");
+    assert_eq!(
+        held.stdout.trim(),
+        "{}",
+        "the sweep left an attempt record for a certificate it renewed\n{report}"
+    );
+
+    // What the certificate authority says it did. Two issuances, not one.
+    let served = cluster.pebble_log(400).unwrap_or_default();
+    let issued = served
+        .lines()
+        .filter(|line| line.contains("Signing cert") || line.contains("order"))
+        .count();
+    assert!(
+        issued >= 2,
+        "the server was asked for a certificate only once\n{served}"
+    );
+}
+
+/// Runs one renewal sweep on a node.
+fn renew(node: &Node, product: &str, at: Option<i64>) -> ek_ek_itest::Output {
+    renew_with(node, product, CONFIG, at)
+}
+
+/// Runs one renewal sweep on a node, from the document named.
+fn renew_with(node: &Node, product: &str, config: &str, at: Option<i64>) -> ek_ek_itest::Output {
+    let moment = at.map(|value| value.to_string());
+    let mut arguments = vec![
+        product,
+        "renew",
+        "--config",
+        config,
+        "--data-dir",
+        "/var/lib/ek-ek",
+        "--challenges",
+        CHALLENGE_FILE,
+    ];
+    if let Some(moment) = &moment {
+        arguments.push("--now");
+        arguments.push(moment);
+    }
+    node.run(&arguments).expect("the renew command should run")
+}
+
+/// Seconds since the epoch, on the machine running the test.
+fn seconds_now() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_secs(),
+    )
+    .expect("it fits")
 }
 
 /// The token from the first `published` record.

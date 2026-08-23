@@ -1251,11 +1251,27 @@ pub enum WarningCode {
     /// server never offers the challenge this certificate would answer.
     #[serde(rename = "config.acme.wildcard_needs_dns01")]
     AcmeWildcardNeedsDns01,
+    /// A certificate is inside its expiry warning window.
+    ///
+    /// An uploaded certificate is never renewed automatically (ADR-0026), so
+    /// this warning is the only thing standing between an operator and a
+    /// service that stops answering handshakes. It is raised for an ACME
+    /// certificate too: renewal can fail, and then the warning is the one
+    /// piece of news that is left.
+    #[serde(rename = "certificate.expiring_soon")]
+    CertificateExpiringSoon,
+    /// A frontend offers a certificate whose validity window has passed.
+    ///
+    /// Separate from `certificate.expired`, which is about material somebody
+    /// uploaded. This one names the frontend, because that is what stops
+    /// serving and what an operator is looking at when they ask why.
+    #[serde(rename = "config.frontend.certificate_expired")]
+    FrontendCertificateExpired,
 }
 
 impl WarningCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::FrontendUnreachableRoutingRule,
         Self::CertificateExpired,
         Self::CertificateChainIncomplete,
@@ -1264,6 +1280,8 @@ impl WarningCode {
         Self::AcmeTermsNotAccepted,
         Self::AcmeNoHttp01Listener,
         Self::AcmeWildcardNeedsDns01,
+        Self::CertificateExpiringSoon,
+        Self::FrontendCertificateExpired,
     ];
 
     /// Returns the translation key this code is looked up under.
@@ -1278,6 +1296,8 @@ impl WarningCode {
             Self::AcmeTermsNotAccepted => "config.acme.terms_not_accepted",
             Self::AcmeNoHttp01Listener => "config.acme.no_http01_listener",
             Self::AcmeWildcardNeedsDns01 => "config.acme.wildcard_needs_dns01",
+            Self::CertificateExpiringSoon => "certificate.expiring_soon",
+            Self::FrontendCertificateExpired => "config.frontend.certificate_expired",
         }
     }
 }
@@ -1334,12 +1354,92 @@ impl ValidationWarning {
 /// Nothing here refuses a configuration. A caller that accepts configuration
 /// shows these to the operator; the traffic path does not call this at all,
 /// because a warning never stops a delivery (ADR-0072).
+///
+/// The clock arrives as a parameter rather than being read here, because two
+/// of these warnings are about time and a rule that reads the system clock is
+/// one nobody can measure (ADR-0079).
 #[must_use]
-pub fn inspect(config: &Config) -> Vec<ValidationWarning> {
+pub fn inspect(config: &Config, now_unix: i64) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
     check_unreachable_rules(config, &mut warnings);
     warnings.extend(acme_faults(config, None));
+    check_expiry(config, now_unix, &mut warnings);
     warnings
+}
+
+/// Reports certificates that are close to their end, and frontends past it.
+///
+/// Both readings come from the same window, so a certificate cannot be past
+/// its end without also being reported as expiring. That is on purpose: the
+/// first warning names the certificate and the second names what stops
+/// serving because of it.
+fn check_expiry(config: &Config, now_unix: i64, warnings: &mut Vec<ValidationWarning>) {
+    // Days rather than seconds, because that is the unit an operator set it
+    // in. The product cannot overflow: the threshold is a `u32` and the
+    // result is an `i64`.
+    let window = i64::from(config.certificate_expiry_warning_days) * 86_400;
+
+    for (at, certificate) in config.certificates.iter().enumerate() {
+        // Nothing has been obtained yet, which is the normal state of an ACME
+        // certificate somebody has just configured. It cannot expire.
+        let Some(validity) = certificate.validity else {
+            continue;
+        };
+        if validity.not_after_unix - now_unix > window {
+            continue;
+        }
+        warnings.push(
+            ValidationWarning::new(
+                WarningCode::CertificateExpiringSoon,
+                FieldPath::root().field("certificates").index(at),
+            )
+            .with_id("certificate", certificate.id.as_str())
+            .with_number("not_after_unix", validity.not_after_unix)
+            .with_number("remaining_seconds", validity.not_after_unix - now_unix),
+        );
+    }
+
+    for (at, frontend) in config.frontends.iter().enumerate() {
+        let Some(tls) = &frontend.tls else {
+            continue;
+        };
+        for (offered, id) in tls.certificates.iter().enumerate() {
+            let Some(certificate) = config
+                .certificates
+                .iter()
+                .find(|held| &held.id == id)
+                .filter(|held| {
+                    held.validity
+                        .is_some_and(|window| window.not_after_unix <= now_unix)
+                })
+            else {
+                continue;
+            };
+            // Named against the frontend rather than the certificate: a
+            // certificate that has expired and that nothing offers costs an
+            // operator nothing, and one that a listener offers is a handshake
+            // that has already started failing.
+            warnings.push(
+                ValidationWarning::new(
+                    WarningCode::FrontendCertificateExpired,
+                    FieldPath::root()
+                        .field("frontends")
+                        .index(at)
+                        .field("tls")
+                        .field("certificates")
+                        .index(offered),
+                )
+                .with_id("frontend", frontend.id.as_str())
+                .with_id("certificate", id.as_str())
+                .with_number(
+                    "not_after_unix",
+                    certificate
+                        .validity
+                        .map_or(0, |window| window.not_after_unix),
+                ),
+            );
+        }
+    }
 }
 
 /// Reports a routing rule an earlier rule already takes every request from.

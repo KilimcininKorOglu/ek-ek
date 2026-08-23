@@ -110,6 +110,7 @@ fn config_at_v1() -> Config {
         acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 

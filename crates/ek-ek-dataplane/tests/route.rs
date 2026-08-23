@@ -21,6 +21,13 @@ use ek_ek_config::{
 use ek_ek_dataplane::route::{Decision, decide, host_matches, normalise, path_matches};
 use ek_ek_dataplane::upstream;
 
+/// The moment these documents are inspected against.
+///
+/// None of them holds a certificate, so nothing here depends on the value. It
+/// is named rather than repeated, so a document that grows a certificate later
+/// has one place to change.
+const NOW: i64 = 1_800_000_000;
+
 /// A rule sending matching requests to a pool.
 fn rule(host: Option<&str>, path: Option<&str>, backend: &str) -> RoutingRule {
     RoutingRule {
@@ -525,15 +532,19 @@ fn document(rules: Vec<RoutingRule>) -> Config {
         acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 
 #[test]
 fn a_rule_an_earlier_one_already_shadows_is_reported() {
-    let warnings = inspect(&document(vec![
-        rule(None, Some("/owa"), "general"),
-        rule(None, Some("/owa/auth"), "never-reached"),
-    ]));
+    let warnings = inspect(
+        &document(vec![
+            rule(None, Some("/owa"), "general"),
+            rule(None, Some("/owa/auth"), "never-reached"),
+        ]),
+        NOW,
+    );
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert_eq!(
@@ -546,34 +557,43 @@ fn a_rule_an_earlier_one_already_shadows_is_reported() {
 fn a_rule_no_earlier_one_shadows_is_not_reported() {
     // The other side. A warning on every list would say nothing about the
     // list it describes.
-    let warnings = inspect(&document(vec![
-        rule(None, Some("/owa/auth"), "more-specific"),
-        rule(None, Some("/owa"), "general"),
-        rule(None, Some("/ews"), "ews"),
-    ]));
+    let warnings = inspect(
+        &document(vec![
+            rule(None, Some("/owa/auth"), "more-specific"),
+            rule(None, Some("/owa"), "general"),
+            rule(None, Some("/ews"), "ews"),
+        ]),
+        NOW,
+    );
 
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
 fn a_rule_taking_everything_shadows_every_rule_after_it() {
-    let warnings = inspect(&document(vec![
-        rule(None, None, "maintenance"),
-        rule(None, Some("/owa"), "owa"),
-        rule(Some("posta.ornek.com.tr"), Some("/ews"), "ews"),
-    ]));
+    let warnings = inspect(
+        &document(vec![
+            rule(None, None, "maintenance"),
+            rule(None, Some("/owa"), "owa"),
+            rule(Some("posta.ornek.com.tr"), Some("/ews"), "ews"),
+        ]),
+        NOW,
+    );
 
     assert_eq!(warnings.len(), 2, "{warnings:?}");
 }
 
 #[test]
 fn a_host_wildcard_shadows_a_name_it_covers_and_no_other() {
-    let warnings = inspect(&document(vec![
-        rule(Some("*.ornek.com.tr"), None, "wide"),
-        rule(Some("posta.ornek.com.tr"), None, "covered"),
-        rule(Some("a.posta.ornek.com.tr"), None, "not-covered"),
-        rule(Some("ornek.com.tr"), None, "also-not-covered"),
-    ]));
+    let warnings = inspect(
+        &document(vec![
+            rule(Some("*.ornek.com.tr"), None, "wide"),
+            rule(Some("posta.ornek.com.tr"), None, "covered"),
+            rule(Some("a.posta.ornek.com.tr"), None, "not-covered"),
+            rule(Some("ornek.com.tr"), None, "also-not-covered"),
+        ]),
+        NOW,
+    );
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
 }
@@ -587,7 +607,10 @@ fn a_configuration_with_an_unreachable_rule_is_still_valid() {
         rule(None, Some("/owa/auth"), "never-reached"),
     ]);
 
-    assert!(!inspect(&config).is_empty(), "the setup produces a warning");
+    assert!(
+        !inspect(&config, NOW).is_empty(),
+        "the setup produces a warning"
+    );
     // Only the routing part is asserted: this document names no backends, so
     // validation refuses it for that instead.
     let refused = ek_ek_config::validate(&config).expect_err("this document is incomplete");

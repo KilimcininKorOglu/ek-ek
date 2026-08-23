@@ -11,6 +11,8 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod acme;
+mod renew;
+mod report;
 mod secret;
 
 #[derive(Parser)]
@@ -40,6 +42,9 @@ enum Command {
 
     /// Obtain one certificate from the configured ACME server and store it
     Acme(AcmeArgs),
+
+    /// Renew the certificates that are running out and warn about the rest
+    Renew(RenewArgs),
 
     /// Work with the credentials the configuration refers to
     #[command(subcommand)]
@@ -93,6 +98,31 @@ struct AcmeArgs {
 }
 
 #[derive(Args)]
+struct RenewArgs {
+    /// Configuration document to read
+    #[arg(long)]
+    config: String,
+
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// File the live challenge answers are written to, for the agent to
+    /// deliver to the traffic path
+    #[arg(long)]
+    challenges: String,
+
+    /// Decide against this moment, in seconds since the epoch, instead of the
+    /// system clock. Answers "what is due later?" without waiting for later
+    #[arg(long)]
+    now: Option<i64>,
+
+    /// File to write the Prometheus exposition for the certificates to
+    #[arg(long)]
+    metrics: Option<String>,
+}
+
+#[derive(Args)]
 struct MatrixArgs {
     /// Configuration document to read
     #[arg(long)]
@@ -125,6 +155,15 @@ fn main() -> ExitCode {
                 data_dir: &args.data_dir,
                 certificate: &args.certificate,
                 challenges: &args.challenges,
+            });
+        }
+        Command::Renew(args) => {
+            return renew::sweep(&renew::Arguments {
+                config: &args.config,
+                data_dir: &args.data_dir,
+                challenges: &args.challenges,
+                at: args.now,
+                metrics: args.metrics.as_deref(),
             });
         }
         Command::Secret(SecretCommand::Set(args)) => {

@@ -3,9 +3,9 @@
 
 //! The `acme` command: obtain one certificate and file it.
 //!
-//! This is what drives an order until `node-agent` exists to do it on a timer
-//! (T-030). It is the same code path the agent will call, not a second one, so
-//! nothing here has to be written twice.
+//! This is what drives one order by hand. [`obtain`] is the body of it, and
+//! renewal drives the same function for every certificate that is running out
+//! (ADR-0079), so nothing here is written twice.
 //!
 //! # What it reports
 //!
@@ -20,14 +20,19 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ek_ek_config::{
     ACCOUNT_KEY, CertificateId, CertificateSource, Config, DnsProvider, DnsProviderConnection,
-    SecretId, acme_faults, http01_listener, validate,
+    SecretId, acme_faults, http01_listener,
 };
 use ek_ek_store::{Change, Secret, Snapshot, SqliteStore, Store};
 use ek_ek_tls::{Challenge, Failure, Publication, Reason};
+
+use crate::report::{failed, list, now, read_config, say};
+
+/// The kind every record this command writes carries.
+pub const KIND: &str = "acme";
 
 /// Everything the command was told.
 pub struct Arguments<'a> {
@@ -43,20 +48,48 @@ pub struct Arguments<'a> {
 
 /// Runs one order.
 pub fn order(arguments: &Arguments<'_>) -> ExitCode {
-    let config = match read_config(arguments.config) {
+    let config = match read_config(arguments.config, KIND) {
         Ok(config) => config,
-        Err(code) => return code,
+        Err(failure) => {
+            failed(KIND, &failure);
+            return ExitCode::FAILURE;
+        }
     };
 
     let id = CertificateId::new(arguments.certificate);
+    match obtain(&config, arguments.data_dir, arguments.challenges, &id) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            failed(KIND, &failure);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Obtains one certificate and files it.
+///
+/// Separate from [`order`] because renewal drives the same thing for a list of
+/// certificates and has to know why each one failed, which an exit code cannot
+/// say (ADR-0079).
+///
+/// # Errors
+///
+/// Returns why the order stopped. Whether it is worth another attempt is
+/// [`Failure::worth_retrying`].
+pub fn obtain(
+    config: &Config,
+    data_dir: &str,
+    challenges: &str,
+    id: &CertificateId,
+) -> Result<(), Failure> {
     let Some(record) = config
         .certificates
         .iter()
-        .find(|certificate| certificate.id == id)
+        .find(|certificate| &certificate.id == id)
     else {
-        return failed(&Failure::new(
+        return Err(Failure::new(
             Reason::Configuration,
-            format!("{} names no certificate", arguments.certificate),
+            format!("{} names no certificate", id.as_str()),
         ));
     };
 
@@ -64,19 +97,19 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
         CertificateSource::AcmeHttp01 => Challenge::Http01,
         CertificateSource::AcmeDns01 { .. } => Challenge::Dns01,
         CertificateSource::ManualUpload => {
-            return failed(&Failure::new(
+            return Err(Failure::new(
                 Reason::Configuration,
                 format!(
                     "{} is uploaded by hand and is not ordered from anywhere",
-                    arguments.certificate
+                    id.as_str()
                 ),
             ));
         }
     };
     if record.sni_names.is_empty() {
-        return failed(&Failure::new(
+        return Err(Failure::new(
             Reason::Configuration,
-            format!("{} covers no name", arguments.certificate),
+            format!("{} covers no name", id.as_str()),
         ));
     }
 
@@ -84,21 +117,21 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
     // The same function decides both, so the two can never drift apart: a
     // certificate an operator was warned about is exactly the one an order
     // refuses, by the same name and the same code (ADR-0026, ADR-0072).
-    let faults = acme_faults(&config, Some(&id));
+    let faults = acme_faults(config, Some(id));
     if !faults.is_empty() {
         for fault in &faults {
             say(&format!(
-                r#"{{"kind":"acme","ts":{},"event":"blocked","path":"{}","code":"{}"}}"#,
+                r#"{{"kind":"{KIND}","ts":{},"event":"blocked","path":"{}","code":"{}"}}"#,
                 now(),
                 fault.path.as_text(),
                 fault.code.key()
             ));
         }
-        return failed(&Failure::new(
+        return Err(Failure::new(
             Reason::Configuration,
             format!(
                 "{} cannot be ordered: {}",
-                arguments.certificate,
+                id.as_str(),
                 faults
                     .iter()
                     .map(|fault| fault.code.key())
@@ -112,7 +145,7 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
     // again rather than assumed, so a future rule change cannot leave this
     // reading a value nothing checked.
     let Some(settings) = config.acme.clone() else {
-        return failed(&Failure::new(
+        return Err(Failure::new(
             Reason::Configuration,
             "the ACME settings must be there".to_owned(),
         ));
@@ -120,8 +153,8 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
 
     let bound = match kind {
         Challenge::Http01 => {
-            let Some(listener) = http01_listener(&config) else {
-                return failed(&Failure::new(
+            let Some(listener) = http01_listener(config) else {
+                return Err(Failure::new(
                     Reason::Configuration,
                     "the port 80 listener must be there".to_owned(),
                 ));
@@ -132,7 +165,7 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
                 .find(|vip| vip.id == listener.vip)
                 .map(|vip| SocketAddr::new(vip.address, listener.port))
             else {
-                return failed(&Failure::new(
+                return Err(Failure::new(
                     Reason::Configuration,
                     format!(
                         "{} is bound to a virtual address that is not defined",
@@ -149,7 +182,7 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
     };
 
     say(&format!(
-        r#"{{"kind":"acme","ts":{},"event":"ordering","certificate":"{}","names":{},"challenge":"{}","directory":"{}"}}"#,
+        r#"{{"kind":"{KIND}","ts":{},"event":"ordering","certificate":"{}","names":{},"challenge":"{}","directory":"{}"}}"#,
         now(),
         id.as_str(),
         list(&record.sni_names),
@@ -157,125 +190,115 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
         settings.directory_url
     ));
 
-    let store = match SqliteStore::open(Path::new(arguments.data_dir)) {
-        Ok(store) => store,
-        Err(error) => {
-            return failed(&Failure::new(
-                Reason::Configuration,
-                format!("{} could not be opened: {error}", arguments.data_dir),
-            ));
-        }
-    };
+    let store = SqliteStore::open(Path::new(data_dir)).map_err(|error| {
+        Failure::new(
+            Reason::Configuration,
+            format!("{data_dir} could not be opened: {error}"),
+        )
+    })?;
 
     let mut state = match store.read() {
         Ok(Some(held)) => held,
         Ok(None) => Snapshot::new(config.clone()),
         Err(error) => {
-            return failed(&Failure::new(
+            return Err(Failure::new(
                 Reason::Configuration,
                 format!("the store could not be read: {error}"),
             ));
         }
     };
-    // The document is the authority on what to serve. The store carries the
-    // account key and, after this run, the material.
-    state.config = config.clone();
+    // The document is the authority on what to serve. What an earlier order
+    // produced comes back with it, because only the store has ever held it and
+    // dropping it would make every certificate look unobtained (ADR-0079).
+    state.config = ek_ek_tls::carry_obtained(config, &state.config);
 
-    let account = match account_key(&mut state, &store) {
-        Ok(key) => key,
-        Err(failure) => return failed(&failure),
-    };
+    let account = account_key(&mut state, &store)?;
 
     let names = record.sni_names.clone();
     let source = record.source.clone();
     let mut answering = match kind {
         Challenge::Http01 => {
             let Some(bound) = bound else {
-                return failed(&Failure::new(
+                return Err(Failure::new(
                     Reason::Configuration,
                     "the port 80 listener must be there".to_owned(),
                 ));
             };
             Answering::Http01 {
                 listener: bound,
-                file: arguments.challenges,
+                file: challenges,
                 live: Vec::new(),
             }
         }
-        Challenge::Dns01 => match dns_provider(&config, &state, &record.source) {
-            Ok((provider, secret)) => Answering::Dns01 {
+        Challenge::Dns01 => {
+            let (provider, secret) = dns_provider(config, &state, &record.source)?;
+            Answering::Dns01 {
                 provider,
                 secret,
                 live: Vec::new(),
-            },
-            Err(failure) => return failed(&failure),
-        },
+            }
+        }
     };
 
     let mut publish = |publication: &Publication| answering.apply(publication);
     let mut pause = |wait: std::time::Duration| std::thread::sleep(wait);
 
-    let obtained =
-        match ek_ek_tls::obtain(&settings, &account, &names, kind, &mut publish, &mut pause) {
-            Ok(obtained) => obtained,
-            Err(failure) => return failed(&failure),
-        };
+    let obtained = ek_ek_tls::obtain(&settings, &account, &names, kind, &mut publish, &mut pause)?;
 
     say(&format!(
-        r#"{{"kind":"acme","ts":{},"event":"obtained","certificate":"{}"}}"#,
+        r#"{{"kind":"{KIND}","ts":{},"event":"obtained","certificate":"{}"}}"#,
         now(),
         id.as_str()
     ));
 
-    let upload = match ek_ek_tls::inspect(&obtained.chain_pem, &obtained.key_pem, None, now()) {
-        Ok(upload) => upload,
-        Err(errors) => {
-            return failed(&Failure::new(
+    let upload = ek_ek_tls::inspect(&obtained.chain_pem, &obtained.key_pem, None, now()).map_err(
+        |errors| {
+            Failure::new(
                 Reason::Protocol,
                 format!(
                     "the certificate the server issued is not usable: {:?}",
                     errors.codes()
                 ),
-            ));
-        }
-    };
+            )
+        },
+    )?;
     for warning in &upload.warnings {
         say(&format!(
-            r#"{{"kind":"acme","ts":{},"event":"warning","certificate":"{}","code":"{}"}}"#,
+            r#"{{"kind":"{KIND}","ts":{},"event":"warning","certificate":"{}","code":"{}"}}"#,
             now(),
             id.as_str(),
             warning.code.key()
         ));
     }
 
-    let next = ek_ek_tls::install(&state, &id, source, upload);
-    if let Err(error) = store.write(
-        &next,
-        &Change::new("acme", format!("{} obtained", id.as_str())),
-    ) {
-        return failed(&Failure::new(
-            Reason::Configuration,
-            format!("the certificate could not be stored: {error}"),
-        ));
-    }
+    let next = ek_ek_tls::install(&state, id, source, upload);
+    store
+        .write(
+            &next,
+            &Change::new(KIND, format!("{} obtained", id.as_str())),
+        )
+        .map_err(|error| {
+            Failure::new(
+                Reason::Configuration,
+                format!("the certificate could not be stored: {error}"),
+            )
+        })?;
 
     say(&format!(
-        r#"{{"kind":"acme","ts":{},"event":"stored","certificate":"{}"}}"#,
+        r#"{{"kind":"{KIND}","ts":{},"event":"stored","certificate":"{}"}}"#,
         now(),
         id.as_str()
     ));
 
-    match usable(&store, &id) {
-        Ok(names) => say(&format!(
-            r#"{{"kind":"acme","ts":{},"event":"usable","certificate":"{}","names":{}}}"#,
-            now(),
-            id.as_str(),
-            list(&names)
-        )),
-        Err(failure) => return failed(&failure),
-    }
+    let served = usable(&store, id)?;
+    say(&format!(
+        r#"{{"kind":"{KIND}","ts":{},"event":"usable","certificate":"{}","names":{}}}"#,
+        now(),
+        id.as_str(),
+        list(&served)
+    ));
 
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 /// Where a challenge answer is put so the certificate authority can read it.
@@ -481,39 +504,6 @@ fn usable(store: &SqliteStore, id: &CertificateId) -> Result<Vec<String>, Failur
     Ok(read.sni_names)
 }
 
-/// Reads and checks the configuration document.
-fn read_config(path: &str) -> Result<Config, ExitCode> {
-    let document = std::fs::read_to_string(path).map_err(|error| {
-        failed(&Failure::new(
-            Reason::Configuration,
-            format!("{path} could not be read: {error}"),
-        ))
-    })?;
-    let config: Config = serde_json::from_str(&document).map_err(|error| {
-        failed(&Failure::new(
-            Reason::Configuration,
-            format!("{path} is not a configuration: {error}"),
-        ))
-    })?;
-
-    validate(&config).map_err(|faults| {
-        for fault in faults.as_slice() {
-            say(&format!(
-                r#"{{"kind":"acme","ts":{},"event":"invalid","path":"{}","code":"{}"}}"#,
-                now(),
-                fault.path.as_text(),
-                fault.code.key()
-            ));
-        }
-        failed(&Failure::new(
-            Reason::Configuration,
-            format!("{path} is not valid"),
-        ))
-    })?;
-
-    Ok(config)
-}
-
 /// Reads the account key, generating and storing one the first time.
 ///
 /// One key for the whole installation, under a fixed identity: the server
@@ -661,56 +651,4 @@ fn write_challenges(path: &str, challenges: &BTreeMap<String, String>) -> Result
         ));
     }
     Ok(())
-}
-
-/// Reports a failure and stops.
-fn failed(failure: &Failure) -> ExitCode {
-    say(&format!(
-        r#"{{"kind":"acme","ts":{},"event":"failed","reason":"{}","detail":"{}"}}"#,
-        now(),
-        failure.reason().key(),
-        escape(failure.detail())
-    ));
-    ExitCode::FAILURE
-}
-
-/// Writes one record, flushed, so a supervisor reading the pipe sees it now
-/// rather than when the buffer happens to fill.
-fn say(record: &str) {
-    use std::io::Write;
-    println!("{record}");
-    let _ = std::io::stdout().flush();
-}
-
-/// Seconds since the epoch.
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(0))
-}
-
-/// A list of strings as a JSON array.
-fn list(values: &[String]) -> String {
-    let quoted: Vec<String> = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape(value)))
-        .collect();
-    format!("[{}]", quoted.join(","))
-}
-
-/// Makes text safe to sit inside a JSON string.
-fn escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other if (other as u32) < 0x20 => out.push(' '),
-            other => out.push(other),
-        }
-    }
-    out
 }

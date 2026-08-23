@@ -60,6 +60,28 @@ pub struct Config {
     /// an operator can change it without restarting anything.
     #[serde(default)]
     pub log_level: LogLevel,
+    /// How many days before a certificate expires an operator is warned.
+    ///
+    /// One value for the whole installation rather than one per certificate:
+    /// a second place to write it is a second place for the two to disagree,
+    /// and nobody has asked for a different threshold per certificate. Missing
+    /// from an older document, which then gets the default (ADR-0019).
+    ///
+    /// Zero means the warning only starts once the certificate has actually
+    /// expired. That is the operator's choice to make; the separate
+    /// `certificate.expired` warning cannot be silenced either way.
+    #[serde(default = "default_expiry_warning_days")]
+    pub certificate_expiry_warning_days: u32,
+}
+
+/// How many days before expiry an operator is warned by default.
+///
+/// Thirty days is long enough to replace a certificate somebody has to buy or
+/// ask an internal authority for, which is the case an automatic renewal does
+/// not cover (ADR-0026).
+#[must_use]
+pub const fn default_expiry_warning_days() -> u32 {
+    30
 }
 
 /// The schema a configuration record was written against.

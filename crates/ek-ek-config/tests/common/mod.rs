@@ -98,6 +98,7 @@ pub fn sample() -> Config {
         }),
         stickiness_key: STICKINESS_KEY.to_owned(),
         log_level: Default::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 

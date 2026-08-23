@@ -18,7 +18,7 @@ use std::path::Path;
 use common::{authority, joined, leaf, now};
 use ek_ek_config::{CertificateId, CertificateSource, Config, LogLevel, SchemaVersion};
 use ek_ek_store::{Change, Snapshot, SqliteStore, Store};
-use ek_ek_tls::{chain_id, inspect, install, key_id, remove};
+use ek_ek_tls::{carry_obtained, chain_id, inspect, install, key_id, remove};
 
 /// A configuration with nothing in it.
 fn empty() -> Config {
@@ -33,6 +33,7 @@ fn empty() -> Config {
         acme: None,
         stickiness_key: String::new(),
         log_level: LogLevel::default(),
+        certificate_expiry_warning_days: 30,
     }
 }
 
@@ -203,4 +204,124 @@ fn the_record_says_where_the_certificate_came_from() {
             "the record does not say where the certificate came from"
         );
     }
+}
+
+#[test]
+fn what_an_order_produced_survives_the_document_being_written_over_it() {
+    // The document an operator writes cannot carry a validity window: only an
+    // order produces one. Replacing the stored configuration with the document
+    // without this would leave every certificate looking unobtained, and
+    // renewal would order all of them on every run (ADR-0079).
+    let ca = authority("ek-ek test CA");
+    let server = leaf("www.example.org", &["www.example.org"], &ca, 0, 90);
+    let id = CertificateId::new("cert-web");
+    let upload = inspect(&server.chain_pem(), &server.key_pem(), None, now()).expect("it is good");
+    let stored = install(
+        &Snapshot::new(empty()),
+        &id,
+        CertificateSource::AcmeHttp01,
+        upload,
+    );
+
+    // What an operator has on disk: the same certificate, nothing obtained.
+    let mut document = empty();
+    document.certificates = vec![ek_ek_config::Certificate {
+        id: id.clone(),
+        sni_names: vec!["www.example.org".to_owned()],
+        source: CertificateSource::AcmeHttp01,
+        validity: None,
+        chain: None,
+        private_key: None,
+    }];
+
+    let merged = carry_obtained(&document, &stored.config);
+
+    assert_eq!(
+        merged.certificates[0].validity, stored.config.certificates[0].validity,
+        "the window the order produced was thrown away"
+    );
+    assert_eq!(merged.certificates[0].chain, Some(chain_id(&id)));
+    assert_eq!(merged.certificates[0].private_key, Some(key_id(&id)));
+}
+
+#[test]
+fn the_document_still_decides_what_exists_and_how_it_is_obtained() {
+    // The other side. Carrying everything forward would make the document
+    // unable to change a certificate at all.
+    let ca = authority("ek-ek test CA");
+    let server = leaf("www.example.org", &["www.example.org"], &ca, 0, 90);
+    let id = CertificateId::new("cert-web");
+    let upload = inspect(&server.chain_pem(), &server.key_pem(), None, now()).expect("it is good");
+    let stored = install(
+        &Snapshot::new(empty()),
+        &id,
+        CertificateSource::AcmeHttp01,
+        upload,
+    );
+
+    let mut document = empty();
+    document.certificates = vec![ek_ek_config::Certificate {
+        id: id.clone(),
+        sni_names: vec!["posta.example.org".to_owned()],
+        source: CertificateSource::ManualUpload,
+        validity: None,
+        chain: None,
+        private_key: None,
+    }];
+
+    let merged = carry_obtained(&document, &stored.config);
+
+    assert_eq!(
+        merged.certificates[0].source,
+        CertificateSource::ManualUpload
+    );
+    assert_eq!(merged.certificates[0].sni_names, vec!["posta.example.org"]);
+}
+
+#[test]
+fn a_stored_certificate_under_another_name_is_not_carried_across() {
+    // The match is by identity. Taking the first stored record whatever it is
+    // would file one certificate's window against another one's name.
+    let ca = authority("ek-ek test CA");
+    let server = leaf("www.example.org", &["www.example.org"], &ca, 0, 90);
+    let upload = inspect(&server.chain_pem(), &server.key_pem(), None, now()).expect("it is good");
+    let stored = install(
+        &Snapshot::new(empty()),
+        &CertificateId::new("cert-other"),
+        CertificateSource::AcmeHttp01,
+        upload,
+    );
+
+    let mut document = empty();
+    document.certificates = vec![ek_ek_config::Certificate {
+        id: CertificateId::new("cert-web"),
+        sni_names: vec!["www.example.org".to_owned()],
+        source: CertificateSource::AcmeHttp01,
+        validity: None,
+        chain: None,
+        private_key: None,
+    }];
+
+    let merged = carry_obtained(&document, &stored.config);
+
+    assert_eq!(merged.certificates[0].validity, None);
+    assert_eq!(merged.certificates[0].chain, None);
+}
+
+#[test]
+fn a_certificate_the_store_never_held_is_left_as_the_document_wrote_it() {
+    let mut document = empty();
+    document.certificates = vec![ek_ek_config::Certificate {
+        id: CertificateId::new("cert-new"),
+        sni_names: vec!["yeni.example.org".to_owned()],
+        source: CertificateSource::AcmeHttp01,
+        validity: None,
+        chain: None,
+        private_key: None,
+    }];
+
+    let merged = carry_obtained(&document, &empty());
+
+    assert_eq!(merged.certificates[0].validity, None);
+    assert_eq!(merged.certificates[0].chain, None);
 }
