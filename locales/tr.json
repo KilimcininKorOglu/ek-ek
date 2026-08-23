@@ -25,6 +25,7 @@
   "config.frontend.access_log_sample_zero": "{frontend} frontend'inin erişim logu açık ama örnekleme oranı sıfır, yani hiçbir kayıt yazılmaz. Her istek için bir kayıt istiyorsanız oranı 1 yapın, hiç kayıt istemiyorsanız erişim logunu kapatın.",
   "config.frontend.certificate_expired": "'{frontend}' frontend'i '{certificate}' sertifikasını sunuyor ve o sertifikanın süresi {not_after_unix} tarihinde doldu. Onu seçen her el sıkışma başarısız olur.",
   "config.frontend.duplicate_binding": "'{vip}' adresinin {port} portu zaten '{conflicting_frontend}' frontend'i tarafından kullanılıyor.",
+  "config.frontend.legacy_tls_policy": "'{frontend}' frontend'i eski uyumlu TLS politikasını kullanıyor, yani TLS 1.0 ve 1.1'i kabul ediyor ve şifre gereksinimlerini düşürüyor. İstemcileri yükseltilebildiğinde geri alın.",
   "config.frontend.redirect_without_http": "'{frontend}' frontend'i yönlendirme kuralı taşıyor ama HTTP konuşmuyor, bu yüzden yanıt veremez.",
   "config.frontend.sni_rules_without_passthrough": "'{frontend}' frontend'i {rule_count} SNI kuralı taşıyor ama TLS'i geçirmiyor. Hiçbir şey ClientHello okumadığı için bu kurallar hiç çalışmaz.",
   "config.frontend.tls_on_passthrough": "'{frontend}' frontend'i TLS'i geçiriyor, yani el sıkışmayı hiç açmıyor ve sertifika sunmuyor. TLS'i sonlandırmak istiyorsanız uygulamasını HTTP yapın.",

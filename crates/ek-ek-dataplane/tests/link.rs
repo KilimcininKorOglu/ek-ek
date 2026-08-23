@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Agent, config, invalid_config, update};
-use ek_ek_config::{ApplicationProtocol, TransportProtocol, VipId};
+use ek_ek_config::{ApplicationProtocol, TlsPolicyLevel, TransportProtocol, VipId};
 use ek_ek_dataplane::{AgentLink, ErrorKind, ListenerKind, bindings};
 use ek_ek_ipc::DataPlaneState;
 use tempfile::TempDir;
@@ -355,6 +355,24 @@ fn listeners_follow_the_frontends() {
     let found = bindings(&raw).expect("the frontends resolve");
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, ListenerKind::Stream);
+
+    // The binding carries the frontend's TLS policy, so what was decided and
+    // what the listener is built with cannot drift apart (ADR-0081).
+    let mut relaxed = config.clone();
+    relaxed.frontends[0].tls = Some(ek_ek_config::TlsSettings {
+        certificates: Vec::new(),
+        default_certificate: None,
+        policy: TlsPolicyLevel::LegacyCompatible,
+    });
+    let found = bindings(&relaxed).expect("the frontends resolve");
+    assert_eq!(found[0].policy, TlsPolicyLevel::LegacyCompatible);
+    assert!(found[0].terminates_tls);
+
+    // A frontend that terminates no TLS names no level either, and the
+    // default is what stands there. Nothing reads it.
+    let found = bindings(&config).expect("the frontends resolve");
+    assert!(!found[0].terminates_tls);
+    assert_eq!(found[0].policy, TlsPolicyLevel::default());
 
     // A passthrough frontend is a listener of its own kind. It shares the L4
     // path, and the kind is what says the ClientHello is read first

@@ -16,13 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ek_ek_config::{ApplicationProtocol, Config, TransportProtocol};
+use ek_ek_config::{ApplicationProtocol, Config, TlsPolicyLevel, TransportProtocol};
 use ek_ek_ipc::DataPlaneState;
 use pingora::apps::HttpServerOptions;
 use pingora::listeners::tls::TlsSettings;
 use pingora::server::{Server, ShutdownWatch};
 use pingora::services::background::background_service;
 use pingora::services::listening::Service;
+use pingora::tls::ssl::SslOptions;
 
 use crate::balance::Balancer;
 use crate::error::{Error, ErrorKind, Result};
@@ -30,6 +31,7 @@ use crate::handshake::SniResolver;
 use crate::health::{Checked, Health, checked, watch};
 use crate::link::AgentLink;
 use crate::live::LiveConfig;
+use crate::policy;
 use crate::proxy::Proxy;
 use crate::stream::StreamProxy;
 use crate::udpproxy::{UdpProxy, udp_bindings};
@@ -52,6 +54,13 @@ pub struct Binding {
     /// Whether this listener terminates TLS, choosing its certificate per
     /// handshake from the SNI name (ADR-0068).
     pub terminates_tls: bool,
+    /// Which protocol versions and cipher suites this listener accepts.
+    ///
+    /// Carried on the binding rather than looked up again while the listener
+    /// is built, so what was decided and what is applied cannot drift apart.
+    /// Meaningless where `terminates_tls` is false, and then left at the
+    /// default (ADR-0081).
+    pub policy: TlsPolicyLevel,
     /// What the listener does with the bytes it accepts.
     pub kind: ListenerKind,
 }
@@ -114,6 +123,12 @@ pub fn bindings(config: &Config) -> Result<Vec<Binding>> {
             address: SocketAddr::new(vip.address, frontend.port).to_string(),
             http2: frontend.http2.is_enabled(),
             terminates_tls: frontend.tls.is_some(),
+            // A frontend that names no TLS settings names no level either, so
+            // the default stands. Nothing reads it there.
+            policy: frontend
+                .tls
+                .as_ref()
+                .map_or_else(TlsPolicyLevel::default, |tls| tls.policy),
             kind,
         });
     }
@@ -197,6 +212,18 @@ pub fn build(link: AgentLink) -> Result<Server> {
                     if binding.http2 {
                         settings.enable_h2();
                     }
+                    apply_policy(&binding.frontend, binding.policy, &mut settings).map_err(
+                        |error| {
+                            Error::new(
+                                ErrorKind::Listener,
+                                format!(
+                                    "frontend {} cannot run the {} TLS policy: {error}",
+                                    binding.frontend,
+                                    policy::name_of(binding.policy)
+                                ),
+                            )
+                        },
+                    )?;
                     service.add_tls_with_settings(&binding.address, None, settings);
                 } else {
                     service.add_tcp(&binding.address);
@@ -261,6 +288,49 @@ pub fn build(link: AgentLink) -> Result<Server> {
     server.add_service(background_service("node-agent link", LinkService { link }));
 
     Ok(server)
+}
+
+/// Puts a policy level onto a listener's TLS settings.
+///
+/// `TlsSettings` dereferences to OpenSSL's own acceptor builder, so the level
+/// is applied to the context the listener is built from. That is what makes
+/// the policy a property of the listener: two frontends at two levels never
+/// see each other's settings (ADR-0081).
+///
+/// The `eski-uyumlu` level is announced here as well as in the warning
+/// channel, because a level chosen in a document and a level actually running
+/// are two different facts, and M8 moves this line to the audit log.
+///
+/// # Errors
+///
+/// Fails when the TLS library refuses a version or a cipher list. That is a
+/// build this library cannot serve the level on, and starting anyway would
+/// leave a frontend running a policy nobody chose.
+fn apply_policy(
+    frontend: &str,
+    level: TlsPolicyLevel,
+    settings: &mut TlsSettings,
+) -> std::result::Result<(), pingora::tls::error::ErrorStack> {
+    let policy = policy::settings(level);
+
+    // The base pingora builds from turns TLS 1.0 and 1.1 off through options
+    // rather than through a minimum version, so lowering the minimum alone
+    // leaves them off. Cleared first, then the minimum decides.
+    settings.clear_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
+    settings.set_min_proto_version(Some(policy::least_openssl_version(level)))?;
+
+    if !policy.cipher_list.is_empty() {
+        settings.set_cipher_list(policy.cipher_list)?;
+    }
+    settings.set_ciphersuites(policy.ciphersuites)?;
+
+    if level == TlsPolicyLevel::LegacyCompatible {
+        log::warn!(
+            "frontend {frontend} runs the {} TLS policy: TLS 1.0 and 1.1 are accepted and the security level is relaxed",
+            policy::name_of(level)
+        );
+    }
+    Ok(())
 }
 
 /// The shortest a process may take to leave once it has been asked to.

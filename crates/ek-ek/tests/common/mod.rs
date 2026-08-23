@@ -364,6 +364,21 @@ impl Drop for Member {
 /// and so a test can sign a value the way the product would.
 pub const STICKINESS_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
+/// Renders one frontend's TLS settings.
+///
+/// A policy of nothing leaves the field out of the document, which is the
+/// shape a frontend nobody set a level on has.
+fn tls_settings(certificates: &[&str], default: Option<&str>, policy: Option<&str>) -> String {
+    let listed = certificates
+        .iter()
+        .map(|id| format!("\"{id}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let default = default.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
+    let policy = policy.map_or_else(String::new, |level| format!(r#","policy":"{level}""#));
+    format!(r#"{{"certificates":[{listed}],"default_certificate":{default}{policy}}}"#)
+}
+
 /// Renders a string as a JSON string.
 ///
 /// Written out rather than taken from a JSON library, because the harness
@@ -419,6 +434,8 @@ pub struct Document {
     pub routing_rules: Vec<String>,
     /// SNI rules, already rendered.
     pub sni_rules: Vec<String>,
+    /// Frontends beyond the first, already rendered.
+    pub extra_frontends: Vec<String>,
     /// Extra backend pools beyond `web`, already rendered.
     pub extra_pools: Vec<String>,
     /// Pool used when no rule matches, or nothing.
@@ -477,6 +494,7 @@ impl Document {
             health_check: "null".to_owned(),
             routing_rules: Vec::new(),
             sni_rules: Vec::new(),
+            extra_frontends: Vec::new(),
             extra_pools: Vec::new(),
             default_backend: r#""web""#.to_owned(),
             stickiness: r#"{"mode":"disabled"}"#.to_owned(),
@@ -607,16 +625,44 @@ impl Document {
     /// `default` is served when the SNI name matches nothing and when the
     /// client sends no name; left out, both are refused (ADR-0070).
     #[must_use]
-    pub fn terminating_tls(mut self, certificates: &[&str], default: Option<&str>) -> Self {
-        let listed = certificates
-            .iter()
-            .map(|id| format!("\"{id}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        let default = default.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
-        self.tls = format!(
-            r#"{{"certificates":[{listed}],"default_certificate":{default},"policy":"dengeli"}}"#
-        );
+    pub fn terminating_tls(self, certificates: &[&str], default: Option<&str>) -> Self {
+        self.terminating_tls_at(certificates, default, Some("dengeli"))
+    }
+
+    /// Says the frontend terminates TLS at the policy level named.
+    ///
+    /// A level of nothing leaves the field out of the document entirely, which
+    /// is what a frontend nobody set a level on looks like and is how the
+    /// default is measured rather than assumed (ADR-0028).
+    #[must_use]
+    pub fn terminating_tls_at(
+        mut self,
+        certificates: &[&str],
+        default: Option<&str>,
+        policy: Option<&str>,
+    ) -> Self {
+        self.tls = tls_settings(certificates, default, policy);
+        self
+    }
+
+    /// Adds a second frontend on its own port, terminating TLS at the level
+    /// named.
+    ///
+    /// Two listeners in one process is the only way to measure that two policy
+    /// levels do not reach into each other; two processes would prove nothing
+    /// about either.
+    #[must_use]
+    pub fn second_tls_frontend(
+        mut self,
+        id: &str,
+        port: u16,
+        certificates: &[&str],
+        policy: &str,
+    ) -> Self {
+        let tls = tls_settings(certificates, None, Some(policy));
+        self.extra_frontends.push(format!(
+            r#"{{"id":"{id}","vip":"vip-web","port":{port},"transport":"tcp","application":"http","tls":{tls},"access_log":{{"enabled":true,"sample_one_in":1}},"proxy_protocol":"disabled","routing_rules":[],"sni_rules":[],"default_backend":"web","http2":"enabled","connect_timeout_seconds":2,"request_timeout_seconds":5,"idle_timeout_seconds":0,"drain_timeout_seconds":5,"udp_session_limit":0}}"#
+        ));
         self
     }
 
@@ -827,7 +873,7 @@ impl Document {
             r#"{{"schema_version":1,
 "nodes":[{{"id":"node1","address":"127.0.0.1","roles":["control_plane","data_plane"]}}],
 "vips":[{{"id":"vip-web","address":"{vip_address}","prefix_length":{prefix_length},"interface":"lo","preferred_node":"node1"}}],
-"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[{sni_rules}],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}],
+"frontends":[{{"id":"web","vip":"vip-web","port":{port},"transport":"{transport}","application":"{application}","tls":{tls},{access_log}{proxy_protocol}"routing_rules":[{rules}],"sni_rules":[{sni_rules}],"default_backend":{default_backend},"http2":"{http2}","connect_timeout_seconds":{connect},"request_timeout_seconds":{request},"idle_timeout_seconds":{idle},"drain_timeout_seconds":{drain},"udp_session_limit":{udp_limit}}}{extra_frontends}],
 "backends":[{{"id":"web","members":[{members}],"algorithm":"{algorithm}","health_check":{health_check},"stickiness":{stickiness},"connection_pooling":"{connection_pooling}","connection_pool_size":{connection_pool_size},"connection_lifetime_seconds":{connection_lifetime_seconds}}}{extra_pools}],
 "certificates":[{certificates}],
 "dns_providers":[],
@@ -857,6 +903,11 @@ impl Document {
             idle = self.idle_timeout_seconds,
             rules = self.routing_rules.join(","),
             sni_rules = self.sni_rules.join(","),
+            extra_frontends = self
+                .extra_frontends
+                .iter()
+                .map(|frontend| format!(",{frontend}"))
+                .collect::<String>(),
             extra_pools = self
                 .extra_pools
                 .iter()

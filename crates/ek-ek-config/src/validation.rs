@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use crate::backend::SessionStickiness;
 use crate::certificate::CertificateSource;
 use crate::config::Config;
-use crate::frontend::{ApplicationProtocol, RoutingRule, RuleAction, TransportProtocol};
+use crate::frontend::{
+    ApplicationProtocol, RoutingRule, RuleAction, TlsPolicyLevel, TransportProtocol,
+};
 use crate::id::{BackendId, CertificateId, DnsProviderId, NodeId, VipId};
 
 /// A stable identifier for one kind of validation failure.
@@ -1316,11 +1318,19 @@ pub enum WarningCode {
     /// serving and what an operator is looking at when they ask why.
     #[serde(rename = "config.frontend.certificate_expired")]
     FrontendCertificateExpired,
+    /// A frontend runs the TLS policy that accepts TLS 1.0 and 1.1.
+    ///
+    /// A warning rather than an error, because ADR-0028 left the level usable
+    /// on purpose: some institutions have clients that cannot be upgraded.
+    /// What it must not be is quiet, so the concession stays visible for as
+    /// long as it is in force (ADR-0081).
+    #[serde(rename = "config.frontend.legacy_tls_policy")]
+    FrontendLegacyTlsPolicy,
 }
 
 impl WarningCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::FrontendUnreachableRoutingRule,
         Self::CertificateExpired,
         Self::CertificateChainIncomplete,
@@ -1331,6 +1341,7 @@ impl WarningCode {
         Self::AcmeWildcardNeedsDns01,
         Self::CertificateExpiringSoon,
         Self::FrontendCertificateExpired,
+        Self::FrontendLegacyTlsPolicy,
     ];
 
     /// Returns the translation key this code is looked up under.
@@ -1347,6 +1358,7 @@ impl WarningCode {
             Self::AcmeWildcardNeedsDns01 => "config.acme.wildcard_needs_dns01",
             Self::CertificateExpiringSoon => "certificate.expiring_soon",
             Self::FrontendCertificateExpired => "config.frontend.certificate_expired",
+            Self::FrontendLegacyTlsPolicy => "config.frontend.legacy_tls_policy",
         }
     }
 }
@@ -1413,7 +1425,35 @@ pub fn inspect(config: &Config, now_unix: i64) -> Vec<ValidationWarning> {
     check_unreachable_rules(config, &mut warnings);
     warnings.extend(acme_faults(config, None));
     check_expiry(config, now_unix, &mut warnings);
+    check_tls_policy(config, &mut warnings);
     warnings
+}
+
+/// Reports every frontend running the relaxed TLS policy.
+///
+/// One warning per frontend rather than one for the whole document, because
+/// what an operator has to look at is the frontend, and because two of them
+/// may be at that level for entirely different reasons (ADR-0081).
+fn check_tls_policy(config: &Config, warnings: &mut Vec<ValidationWarning>) {
+    for (at, frontend) in config.frontends.iter().enumerate() {
+        let Some(tls) = &frontend.tls else {
+            continue;
+        };
+        if tls.policy != TlsPolicyLevel::LegacyCompatible {
+            continue;
+        }
+        warnings.push(
+            ValidationWarning::new(
+                WarningCode::FrontendLegacyTlsPolicy,
+                FieldPath::root()
+                    .field("frontends")
+                    .index(at)
+                    .field("tls")
+                    .field("policy"),
+            )
+            .with_id("frontend", frontend.id.as_str()),
+        );
+    }
 }
 
 /// Reports certificates that are close to their end, and frontends past it.

@@ -21,7 +21,7 @@ use openssl::ec::{EcGroup, EcKey};
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
 use openssl::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName,
     SubjectKeyIdentifier,
@@ -251,6 +251,91 @@ pub fn handshake(
         chain_length,
         verified: session.verify_result() == openssl::x509::X509VerifyResult::OK,
     })
+}
+
+/// A client that speaks exactly one protocol version.
+///
+/// Both ends are pinned on purpose. A client with only a maximum still offers
+/// everything below it, so a frontend that refused the version under
+/// measurement could answer on an older one and the refusal would go unseen.
+///
+/// # Errors
+///
+/// Returns the reason the handshake did not complete, which is what a test
+/// measuring a refused version reads.
+pub fn handshake_at(port: u16, version: SslVersion, server_name: &str) -> Result<String, String> {
+    let mut builder =
+        SslConnector::builder(SslMethod::tls_client()).map_err(|error| error.to_string())?;
+    builder.set_verify(SslVerifyMode::NONE);
+    // OpenSSL 3 refuses the signatures and cipher suites of the old versions
+    // at its default security level, so a client measuring them has to be
+    // allowed to offer them at all. This says nothing about the server.
+    builder
+        .set_cipher_list("ALL:@SECLEVEL=0")
+        .map_err(|error| error.to_string())?;
+    builder
+        .set_min_proto_version(Some(version))
+        .map_err(|error| error.to_string())?;
+    builder
+        .set_max_proto_version(Some(version))
+        .map_err(|error| error.to_string())?;
+    let connector = builder.build();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    let session = connector
+        .configure()
+        .map_err(|error| error.to_string())?
+        .verify_hostname(false)
+        .connect(server_name, stream)
+        .map_err(|error| error.to_string())?;
+
+    Ok(session.ssl().version_str().to_owned())
+}
+
+/// A client offering exactly the cipher suites named, at TLS 1.2.
+///
+/// # Errors
+///
+/// Returns the reason the handshake did not complete.
+pub fn handshake_with_ciphers(
+    port: u16,
+    ciphers: &str,
+    server_name: &str,
+) -> Result<String, String> {
+    let mut builder =
+        SslConnector::builder(SslMethod::tls_client()).map_err(|error| error.to_string())?;
+    builder.set_verify(SslVerifyMode::NONE);
+    builder
+        .set_cipher_list(ciphers)
+        .map_err(|error| error.to_string())?;
+    // Pinned to 1.2, because the suites under measurement live there and a
+    // 1.3 handshake would ignore the list entirely.
+    builder
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .map_err(|error| error.to_string())?;
+    builder
+        .set_max_proto_version(Some(SslVersion::TLS1_2))
+        .map_err(|error| error.to_string())?;
+    let connector = builder.build();
+
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    let session = connector
+        .configure()
+        .map_err(|error| error.to_string())?
+        .verify_hostname(false)
+        .connect(server_name, stream)
+        .map_err(|error| error.to_string())?;
+
+    Ok(session
+        .ssl()
+        .current_cipher()
+        .map_or_else(String::new, |cipher| cipher.name().to_owned()))
 }
 
 /// A TLS connection held open across more than one request.

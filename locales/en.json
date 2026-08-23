@@ -25,6 +25,7 @@
   "config.frontend.access_log_sample_zero": "Frontend {frontend} has its access log on with a sample rate of zero, so no record is ever written. Set the rate to 1 for a record per request, or turn the access log off.",
   "config.frontend.certificate_expired": "Frontend '{frontend}' offers certificate '{certificate}', which expired on {not_after_unix}. Every handshake that picks it fails.",
   "config.frontend.duplicate_binding": "Port {port} on '{vip}' is already taken by frontend '{conflicting_frontend}'.",
+  "config.frontend.legacy_tls_policy": "Frontend '{frontend}' runs the legacy TLS policy, so it accepts TLS 1.0 and 1.1 and lowers the cipher requirements. Move it back once its clients can be upgraded.",
   "config.frontend.redirect_without_http": "Frontend '{frontend}' has a redirect rule but does not speak HTTP, so it cannot answer one.",
   "config.frontend.sni_rules_without_passthrough": "Frontend '{frontend}' carries {rule_count} SNI rule(s) but does not pass TLS through, so nothing ever reads a ClientHello to match them against.",
   "config.frontend.tls_on_passthrough": "Frontend '{frontend}' passes TLS through, so it never opens the handshake and never presents a certificate. Set its application to HTTP to terminate TLS instead.",
