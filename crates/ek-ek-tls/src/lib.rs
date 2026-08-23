@@ -1,11 +1,17 @@
 // Copyright (C) 2026 Kerem Gok
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Certificate inspection and upload for the control plane.
+//! Certificates for the control plane: what an operator uploads and what ACME
+//! obtains.
 //!
 //! An operator uploads a certificate and its private key. This crate reads
 //! them, refuses what cannot be served, says what is worth knowing about what
 //! can, and turns the result into a store state (ADR-0026).
+//!
+//! The other source is an ACME server. [`order`] decides what to ask it and
+//! reads the answers with no socket anywhere in it; [`acme`] carries those
+//! asks over HTTPS, holds the nonce and waits between attempts. Both ends up
+//! in the same place: material that [`install`] files in the store.
 //!
 //! # Why this is not in the traffic path
 //!
@@ -31,8 +37,23 @@
 //! private key never travels inside one, because an error is written to a log
 //! eventually.
 
+pub mod acme;
+pub mod attempt;
+pub mod csr;
+pub mod error;
 pub mod inspect;
+pub mod jws;
+pub mod order;
 pub mod record;
 
+pub use acme::{Obtained, POLL_INTERVAL, Reply, Transport, obtain, obtain_over, run};
+pub use attempt::{ATTEMPTS, FIRST_WAIT, wait_before, whole_run};
+pub use csr::{Request, request};
+pub use error::{Failure, Reason};
 pub use inspect::{MOST_CERTIFICATES, Upload, inspect};
+pub use jws::{
+    Account, Identify, account_from_pem, account_key, account_to_pem, base64url, jwk,
+    key_authorization, sign, thumbprint,
+};
+pub use order::{Answer, Ask, Flow, MOST_NONCE_RETRIES, MOST_POLLS, Progress};
 pub use record::{CHAIN_SUFFIX, KEY_SUFFIX, chain_id, install, key_id, remove};

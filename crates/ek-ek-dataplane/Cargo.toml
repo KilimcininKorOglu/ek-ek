@@ -12,6 +12,7 @@ description = "Traffic path: HTTP, TCP and UDP proxying, TLS termination, health
 [dependencies]
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 http = { workspace = true }
 ek-ek-config = { workspace = true }
 ek-ek-ipc = { workspace = true }

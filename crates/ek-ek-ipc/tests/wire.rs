@@ -26,6 +26,7 @@ fn empty_config() -> Config {
         backends: Vec::new(),
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
     }
@@ -37,6 +38,7 @@ fn a_message_survives_a_round_trip() {
         generation: 12,
         config: empty_config(),
         certificates: BTreeMap::new(),
+        challenges: BTreeMap::new(),
     });
     let line = encode(&delivery).expect("it must encode");
     assert_eq!(
@@ -123,6 +125,7 @@ fn a_message_from_a_newer_release_is_refused_by_name() {
         generation: 1,
         config: empty_config(),
         certificates: BTreeMap::new(),
+        challenges: BTreeMap::new(),
     }))
     .expect("it must encode");
     decode::<AgentMessage>(&known).expect("a known message decodes");

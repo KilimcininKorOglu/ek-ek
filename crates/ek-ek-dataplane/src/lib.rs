@@ -20,6 +20,7 @@
 
 pub mod balance;
 pub mod certs;
+pub mod challenge;
 pub mod error;
 pub mod handshake;
 pub mod hashring;
@@ -40,6 +41,7 @@ pub mod udpproxy;
 
 pub use balance::{Balancer, ring_for};
 pub use certs::{Certificates, LoadFailure, Loaded};
+pub use challenge::{PREFIX, Reply, reply};
 pub use error::{Error, ErrorKind, Result};
 pub use handshake::SniResolver;
 pub use hashring::{HashRing, hash};

@@ -10,6 +10,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod acme;
+
 #[derive(Parser)]
 #[command(
     name = "ek-ek",
@@ -34,6 +36,29 @@ enum Command {
 
     /// Show which node should hold which virtual address, and with what numbers
     Matrix(MatrixArgs),
+
+    /// Obtain one certificate from the configured ACME server and store it
+    Acme(AcmeArgs),
+}
+
+#[derive(Args)]
+struct AcmeArgs {
+    /// Configuration document to read
+    #[arg(long)]
+    config: String,
+
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// Identity of the certificate to obtain
+    #[arg(long)]
+    certificate: String,
+
+    /// File the live challenge answers are written to, for the agent to
+    /// deliver to the traffic path
+    #[arg(long)]
+    challenges: String,
 }
 
 #[derive(Args)]
@@ -63,6 +88,14 @@ fn main() -> ExitCode {
         }
         Command::DataPlane(args) => return run_data_plane(&args),
         Command::Matrix(args) => return show_matrix(&args),
+        Command::Acme(args) => {
+            return acme::order(&acme::Arguments {
+                config: &args.config,
+                data_dir: &args.data_dir,
+                certificate: &args.certificate,
+                challenges: &args.challenges,
+            });
+        }
     }
 
     ExitCode::SUCCESS

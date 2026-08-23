@@ -152,6 +152,7 @@ fn document(offers: &[&str], default: Option<&str>, certificates: Vec<Certificat
         }],
         certificates,
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
     }

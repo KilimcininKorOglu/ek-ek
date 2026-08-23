@@ -47,6 +47,12 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    # A data license, not a code one. It arrives with the copy of Mozilla's
+    # root certificate list that ureq's native-tls provider carries. Nothing
+    # here reads that list: both callers name the authority they trust, either
+    # the machine's own store or one the configuration carries. The license is
+    # permissive and carries no copyleft, so it combines into an AGPL work.
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
     "ISC",
     "MIT",

@@ -48,12 +48,22 @@ tempfile = "3"
 # what dynamic certificate resolution is (ADR-0068).
 pingora = { version = "0.8", default-features = false, features = ["openssl", "proxy", "lb"] }
 arc-swap = "1"
+# The buffer type pingora writes a response body from. Already in the tree
+# through pingora itself, so naming it adds no supply chain surface; pingora
+# does not re-export it, and the traffic path answers the ACME challenge with
+# a body of its own.
+bytes = "1"
 async-trait = "0.1"
 # The library pingora's openssl backend already uses, so both sides of a
 # handshake agree on what a certificate is (ADR-0068). A dev-dependency
 # wherever tests build certificates and speak TLS from the client side, and a
 # real dependency of ek-ek-tls, which inspects what an operator uploads.
 openssl = "0.10"
+# The HTTP client the ACME order flow speaks over. Blocking, so the control
+# plane needs no async runtime for it, and pointed at the native TLS provider
+# so the tree keeps one TLS stack rather than gaining rustls beside openssl
+# (ADR-0068).
+ureq = { version = "3.4", default-features = false, features = ["native-tls"] }
 # UDP listeners need SO_REUSEPORT so a replacement process can bind the port
 # the old one is still serving. The standard library has no way to set a
 # socket option before bind.

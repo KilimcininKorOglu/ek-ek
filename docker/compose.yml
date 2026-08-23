@@ -42,6 +42,12 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.11
+        # A name with dots in it, because an ACME identifier is a domain name
+        # and a single label is not one. Docker's own resolver answers it, so
+        # the certificate authority container looks this node up the way a
+        # real one looks up a customer's name.
+        aliases:
+          - node1.ek-ek.test
 
   node2:
     <<: *node
@@ -137,6 +143,32 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.23
+
+  # An ACME server, for measuring that the order flow this product wrote is
+  # one a certificate authority accepts (T-027). Pebble is Let's Encrypt's own
+  # test server and misbehaves on purpose: it rejects a share of the nonces it
+  # issued and varies the order of what it returns, so a client that only
+  # works against a well behaved server fails here.
+  #
+  # It must not be reachable from outside the lab. Nothing it issues is
+  # trusted by anything, and its own key ships inside the image.
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    container_name: ek-ek-pebble
+    hostname: pebble
+    restart: "no"
+    init: true
+    environment:
+      # Validation runs immediately instead of after a random pause, so a
+      # measurement waits on the product rather than on the test server.
+      PEBBLE_VA_NOSLEEP: "1"
+    volumes:
+      # Only to move the challenge check onto port 80. The shipped file uses
+      # 5002, and the product listens where a real authority asks.
+      - ./pebble/config.json:/test/config/pebble-config.json:ro
+    networks:
+      lab:
+        ipv4_address: 172.28.0.41
 
 networks:
   lab:

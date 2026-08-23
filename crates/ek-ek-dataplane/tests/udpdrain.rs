@@ -107,6 +107,7 @@ fn document(port: u16, member_port: u16, idle: u32, drain: u32) -> Config {
         }],
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
     }
@@ -129,6 +130,7 @@ impl Running {
             generation: 1,
             config: document(port, member_port, idle, drain),
             certificates: std::collections::BTreeMap::new(),
+            challenges: std::collections::BTreeMap::new(),
         }));
         let status = Arc::new(Status::new());
         let balancer = Arc::new(Balancer::new());

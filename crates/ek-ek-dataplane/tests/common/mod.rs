@@ -102,6 +102,7 @@ pub fn config(members: u16) -> Config {
         }],
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
     }
@@ -120,6 +121,7 @@ pub fn update(generation: u64, config: Config) -> ConfigUpdate {
         generation,
         config,
         certificates: std::collections::BTreeMap::new(),
+        challenges: std::collections::BTreeMap::new(),
     }
 }
 

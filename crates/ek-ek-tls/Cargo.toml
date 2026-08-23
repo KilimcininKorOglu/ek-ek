@@ -17,6 +17,12 @@ ek-ek-store = { workspace = true }
 # certificate this crate accepts is one that path can load. A second parser
 # would let the two disagree about what a certificate is.
 openssl = { workspace = true }
+# The ACME order flow is JSON over HTTPS. The flow itself builds and reads the
+# documents; this only carries them.
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 # The measurements write a store to disk, to read back what really landed

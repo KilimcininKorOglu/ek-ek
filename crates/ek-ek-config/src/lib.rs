@@ -31,6 +31,7 @@
 //! preferred node and the node list, because a number the product can derive
 //! is a number the operator should never have to own.
 
+pub mod acme;
 pub mod backend;
 pub mod certificate;
 pub mod config;
@@ -45,6 +46,7 @@ pub mod template;
 pub mod validation;
 pub mod vip;
 
+pub use acme::{ACCOUNT_KEY, AcmeSettings};
 pub use backend::{
     AdminState, Backend, BackendMember, ConnectionPooling, LoadBalancingAlgorithm, SameSitePolicy,
     SessionStickiness,
@@ -74,8 +76,8 @@ pub use template::{
     UserTemplate, Verification, apply, embedded, embedded_by_id, from_frontend, undo,
 };
 pub use validation::{
-    ErrorCode, FieldPath, ParameterValue, PathSegment, ValidationError, ValidationErrors,
-    ValidationWarning, WarningCode, inspect, validate, validate_certificate_removal,
-    validate_vip_removal,
+    ErrorCode, FieldPath, HTTP01_PORT, ParameterValue, PathSegment, ValidationError,
+    ValidationErrors, ValidationWarning, WarningCode, acme_faults, http01_listener, inspect,
+    validate, validate_certificate_removal, validate_vip_removal,
 };
 pub use vip::Vip;

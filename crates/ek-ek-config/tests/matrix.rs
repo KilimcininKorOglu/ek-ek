@@ -51,6 +51,7 @@ fn cluster(nodes: Vec<Node>, vips: Vec<Vip>) -> Config {
         backends: Vec::new(),
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: ek_ek_config::LogLevel::default(),
     }

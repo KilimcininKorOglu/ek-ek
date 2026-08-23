@@ -45,6 +45,12 @@ pub struct Live {
     /// configuration that references them, so a handshake never reads a new
     /// configuration against an old certificate set (ADR-0068).
     pub certificates: Arc<Certificates>,
+    /// The ACME HTTP-01 answers this delivery says to serve, keyed by token.
+    ///
+    /// Held beside the configuration and swapped with it, so the moment the
+    /// order is over the next delivery takes the path away. Empty is the
+    /// normal state (ADR-0026).
+    pub challenges: BTreeMap<String, String>,
 }
 
 impl Live {
@@ -62,6 +68,7 @@ impl Live {
             config: update.config,
             rings,
             certificates,
+            challenges: update.challenges,
         }
     }
 

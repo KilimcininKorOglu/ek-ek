@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::acme::AcmeSettings;
 use crate::backend::Backend;
 use crate::certificate::{Certificate, DnsProvider};
 use crate::frontend::Frontend;
@@ -33,6 +34,14 @@ pub struct Config {
     pub certificates: Vec<Certificate>,
     /// Providers used for the ACME DNS-01 challenge.
     pub dns_providers: Vec<DnsProvider>,
+    /// How to reach the ACME server, when any certificate is ordered from one.
+    ///
+    /// One block for the whole installation rather than one per certificate:
+    /// every order shares an account, and the server's rate limits are counted
+    /// per account (ADR-0026). Absent when nothing is ordered automatically,
+    /// which is the case for an installation that only uploads certificates.
+    #[serde(default)]
+    pub acme: Option<AcmeSettings>,
     /// Key the stickiness cookie is signed with, as hex.
     ///
     /// It sits at the root rather than inside a pool because it has to be

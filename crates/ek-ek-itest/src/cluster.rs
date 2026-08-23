@@ -22,6 +22,23 @@ const MAIL: (&str, u8) = ("mail", 23);
 pub const MAIL_PROXIED_PORT: u16 = 25;
 /// Port on the mail server that knows nothing about the header.
 pub const MAIL_PLAIN_PORT: u16 = 26;
+/// The ACME test server the certificate measurements order from.
+const PEBBLE: (&str, u8) = ("pebble", 41);
+/// Where the ACME server publishes its directory document.
+pub const PEBBLE_DIRECTORY: &str = "https://pebble:14000/dir";
+/// The authority inside the ACME server's image that signs its own HTTPS
+/// certificate.
+///
+/// A client has to be told to trust it, because nothing else does. Read out of
+/// the container at run time rather than copied into this repository: a
+/// certificate in a tracked file is a certificate that goes stale and a file
+/// the secret scan has to be argued with.
+const PEBBLE_ROOT: &str = "/test/certs/pebble.minica.pem";
+/// The name node1 answers to on the lab network, for an ACME identifier.
+///
+/// An ACME identifier is a domain name, and a single label is not one. This is
+/// a network alias on the node, so the ACME server's own resolver answers it.
+pub const LAB_NAME: &str = "node1.ek-ek.test";
 const BUILDER: &str = "builder";
 const BUILDERS: usize = 1;
 const LAB_PREFIX: [u8; 3] = [172, 28, 0];
@@ -50,6 +67,7 @@ impl Cluster {
         // as long as an image with the same tag exists, and the tests then run
         // against an image nobody can reproduce from the repository.
         compose_ok(&["up", "-d", "--build", "--wait"])?;
+        refresh_builder()?;
 
         let cluster = Self {
             nodes: NODES
@@ -104,6 +122,36 @@ impl Cluster {
     /// Address of the real SMTP server on the lab network.
     pub fn mail_address(&self) -> Ipv4Addr {
         lab_address(MAIL.1)
+    }
+
+    /// Address of the ACME test server on the lab network.
+    pub fn pebble_address(&self) -> Ipv4Addr {
+        lab_address(PEBBLE.1)
+    }
+
+    /// The certificate authority the ACME test server's own HTTPS endpoint is
+    /// signed by, as PEM.
+    ///
+    /// Read out of the running container, so what a measurement trusts is what
+    /// the image actually uses rather than a copy that drifted.
+    pub fn pebble_root(&self) -> Result<String> {
+        // Copied out rather than read with a shell: the image carries the
+        // server and nothing else, so there is no command inside it to run.
+        let pem = copy_out("ek-ek-pebble", PEBBLE_ROOT)?;
+        if !pem.contains("BEGIN CERTIFICATE") {
+            return Err(Error::new(
+                "the ACME test server's root certificate did not come back as PEM".to_owned(),
+            ));
+        }
+        Ok(pem)
+    }
+
+    /// Everything the ACME test server has logged, newest lines last.
+    ///
+    /// It says what it asked for and what it made of the answer, which is the
+    /// only reading of the challenge that comes from outside this project.
+    pub fn pebble_log(&self, lines: usize) -> Result<String> {
+        compose_output(&["logs", "--tail", &lines.to_string(), PEBBLE.0])
     }
 
     /// Everything the mail server has logged, newest lines last.
@@ -276,6 +324,53 @@ fn compose_ok(args: &[&str]) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )))
+}
+
+/// Replaces the builder when the files it compiles from are no longer there.
+///
+/// The builder mounts single files, and an editor that writes a new file over
+/// `Cargo.toml` leaves the container holding the old one, now unlinked. Every
+/// build then fails with a missing manifest, which reads like a broken
+/// workspace rather than a stale mount. Checking costs one exec; recreating
+/// only happens after the manifest was actually edited.
+fn refresh_builder() -> Result<()> {
+    let present = compose()
+        .args(["exec", "-T", BUILDER, "test", "-f", "/src/Cargo.toml"])
+        .output()
+        .map_err(|e| Error::new(format!("cannot reach the builder: {e}")))?;
+    if present.status.success() {
+        return Ok(());
+    }
+    compose_ok(&["up", "-d", "--force-recreate", BUILDER])
+}
+
+/// Reads one file out of a container that has no shell in it.
+///
+/// `docker cp` to standard output writes a tar stream, so the file is copied
+/// into a temporary directory and read from there instead of parsed.
+fn copy_out(container: &str, path: &str) -> Result<String> {
+    let directory = std::env::temp_dir().join(format!("ek-ek-copy-{container}"));
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| Error::new(format!("cannot make {}: {e}", directory.display())))?;
+    let name = Path::new(path)
+        .file_name()
+        .ok_or_else(|| Error::new(format!("{path} names no file")))?;
+    let target = directory.join(name);
+
+    let output = Command::new("docker")
+        .args(["cp", &format!("{container}:{path}")])
+        .arg(&target)
+        .output()
+        .map_err(|e| Error::new(format!("docker cp could not start: {e}")))?;
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "docker cp {container}:{path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    std::fs::read_to_string(&target)
+        .map_err(|e| Error::new(format!("cannot read {}: {e}", target.display())))
 }
 
 fn compose_output(args: &[&str]) -> Result<String> {

@@ -63,6 +63,19 @@ pub struct ConfigUpdate {
     /// and decrypts it; the socket is `0600` and never leaves the machine.
     #[serde(default)]
     pub certificates: BTreeMap<CertificateId, CertificateMaterial>,
+    /// The ACME HTTP-01 challenges the traffic path must answer right now,
+    /// keyed by token.
+    ///
+    /// It travels with the configuration for the same reason the certificate
+    /// material does (ADR-0069): the answer and the configuration that decides
+    /// where it is served arrive in one delivery, so there is no window where
+    /// one is live without the other.
+    ///
+    /// Empty is the normal state. The path is open only while an order is
+    /// waiting on it, and it closes again by the next delivery carrying an
+    /// empty map, so nothing is left listening on a name a stranger can guess.
+    #[serde(default)]
+    pub challenges: BTreeMap<String, String>,
 }
 
 /// One certificate's chain and private key, both as PEM.

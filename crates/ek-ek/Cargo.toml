@@ -21,6 +21,13 @@ ek-ek-config = { workspace = true }
 ek-ek-dataplane = { workspace = true }
 ek-ek-log = { workspace = true }
 ek-ek-ipc = { workspace = true }
+# `acme` obtains a certificate and files it. The order flow and the store are
+# what it needs; the traffic path is a separate process and is not involved.
+ek-ek-store = { workspace = true }
+ek-ek-tls = { workspace = true }
+# `acme` reads its own listener back before telling the certificate authority
+# to come and check it. Nothing else here speaks HTTP as a client.
+ureq = { workspace = true }
 # The configuration document on disk is JSON, and `matrix` reads one.
 serde_json = { workspace = true }
 tokio = { workspace = true }

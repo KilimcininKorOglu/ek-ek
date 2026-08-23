@@ -522,6 +522,7 @@ fn document(rules: Vec<RoutingRule>) -> Config {
         backends: Vec::new(),
         certificates: Vec::new(),
         dns_providers: Vec::new(),
+        acme: None,
         stickiness_key: String::new(),
         log_level: Default::default(),
     }

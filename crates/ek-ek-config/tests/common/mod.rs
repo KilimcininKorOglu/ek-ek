@@ -11,8 +11,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use ek_ek_config::{
-    AdminState, ApplicationProtocol, Backend, BackendId, BackendMember, Certificate, CertificateId,
-    CertificateSource, CertificateValidity, Config, ConnectionPooling, DnsProvider,
+    AcmeSettings, AdminState, ApplicationProtocol, Backend, BackendId, BackendMember, Certificate,
+    CertificateId, CertificateSource, CertificateValidity, Config, ConnectionPooling, DnsProvider,
     DnsProviderConnection, DnsProviderId, DnsRecordType, Frontend, FrontendId, HealthCheck,
     HealthProbe, Http2, LoadBalancingAlgorithm, MemberId, Node, NodeId, NodeRole, PathCase,
     ProbePayload, ProxyProtocol, RoutingRule, RuleAction, SameSitePolicy, SchemaVersion, SecretId,
@@ -87,6 +87,12 @@ pub fn sample() -> Config {
                 },
             },
         ],
+        acme: Some(AcmeSettings {
+            directory_url: "https://acme.example.org/directory".to_owned(),
+            contact_email: "yonetici@example.org".to_owned(),
+            accepted_terms: true,
+            trusted_root_pem: String::new(),
+        }),
         stickiness_key: STICKINESS_KEY.to_owned(),
         log_level: Default::default(),
     }

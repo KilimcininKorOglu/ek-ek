@@ -823,6 +823,120 @@ fn check_certificates(config: &Config, errors: &mut Vec<ValidationError>) {
     }
 }
 
+/// The port an ACME server asks the HTTP-01 challenge on.
+///
+/// Fixed by RFC 8555: the server connects to port 80 and follows redirects
+/// from there. It is not configurable, because the other side of the
+/// conversation does not read this configuration.
+pub const HTTP01_PORT: u16 = 80;
+
+/// The frontend that can answer an HTTP-01 challenge, if there is one.
+///
+/// A plaintext HTTP frontend over TCP on port 80. TLS is excluded because the
+/// server connects in the clear, and a listener that only speaks TLS answers
+/// nothing it sends.
+///
+/// Shared rather than written twice: the same rule decides whether a
+/// configuration is accepted and whether an order may be started, and two
+/// copies of it would eventually disagree (ADR-0026).
+#[must_use]
+pub fn http01_listener(config: &Config) -> Option<&crate::frontend::Frontend> {
+    config.frontends.iter().find(|frontend| {
+        frontend.port == HTTP01_PORT
+            && frontend.application == ApplicationProtocol::Http
+            && frontend.transport == TransportProtocol::Tcp
+            && frontend.tls.is_none()
+    })
+}
+
+/// Everything that stops an ACME order from working.
+///
+/// These are warnings rather than errors, and the reason is what a
+/// configuration means. A certificate an ACME server has not issued yet is a
+/// perfectly storable intention: an operator writes the certificate down,
+/// then points the name at this cluster, then accepts the terms. Refusing the
+/// document would mean the three had to happen in one step, and the shipped
+/// `website` template could not produce a document at all (ADR-0072).
+///
+/// The order itself refuses on exactly this list, so nothing fails silently:
+/// what is a warning while the configuration sits still is a hard stop the
+/// moment somebody asks for the certificate (ADR-0026).
+///
+/// With `only` given, faults about other certificates are left out, so one
+/// order is not stopped by another certificate's problem.
+#[must_use]
+pub fn acme_faults(config: &Config, only: Option<&CertificateId>) -> Vec<ValidationWarning> {
+    let mut warnings = Vec::new();
+
+    let ordered: Vec<(usize, &crate::certificate::Certificate)> = config
+        .certificates
+        .iter()
+        .enumerate()
+        .filter(|(_, certificate)| {
+            only.is_none_or(|wanted| &certificate.id == wanted)
+                && matches!(
+                    certificate.source,
+                    CertificateSource::AcmeHttp01 | CertificateSource::AcmeDns01 { .. }
+                )
+        })
+        .collect();
+
+    if ordered.is_empty() {
+        return warnings;
+    }
+
+    let here = |at: usize| {
+        FieldPath::root()
+            .field("certificates")
+            .index(at)
+            .field("source")
+    };
+
+    let Some(acme) = &config.acme else {
+        for (at, certificate) in &ordered {
+            warnings.push(
+                ValidationWarning::new(WarningCode::AcmeMissing, here(*at))
+                    .with_id("certificate", certificate.id.as_str()),
+            );
+        }
+        return warnings;
+    };
+
+    // Every request in the flow is signed, but the directory that says where
+    // to send them is not. Over plain HTTP, anybody on the path could point
+    // the account at a server of their own.
+    if !acme.directory_url.starts_with("https://") {
+        warnings.push(ValidationWarning::new(
+            WarningCode::AcmeDirectoryUrlInvalid,
+            FieldPath::root().field("acme").field("directory_url"),
+        ));
+    }
+
+    if !acme.accepted_terms {
+        warnings.push(ValidationWarning::new(
+            WarningCode::AcmeTermsNotAccepted,
+            FieldPath::root().field("acme").field("accepted_terms"),
+        ));
+    }
+
+    // Named per certificate rather than once, because the operator has to know
+    // which certificate cannot be obtained, not only that one cannot.
+    if http01_listener(config).is_none() {
+        for (at, certificate) in &ordered {
+            if certificate.source != CertificateSource::AcmeHttp01 {
+                continue;
+            }
+            warnings.push(
+                ValidationWarning::new(WarningCode::AcmeNoHttp01Listener, here(*at))
+                    .with_id("certificate", certificate.id.as_str())
+                    .with_number("port", i64::from(HTTP01_PORT)),
+            );
+        }
+    }
+
+    warnings
+}
+
 fn check_backends(config: &Config, errors: &mut Vec<ValidationError>) {
     for (at, backend) in config.backends.iter().enumerate() {
         let here = || FieldPath::root().field("backends").index(at);
@@ -1046,14 +1160,32 @@ pub enum WarningCode {
     /// short chain.
     #[serde(rename = "certificate.chain.incomplete")]
     CertificateChainIncomplete,
+    /// A certificate is ordered from an ACME server, but none is configured.
+    #[serde(rename = "config.acme.missing")]
+    AcmeMissing,
+    /// The ACME directory is named by something that is not an HTTPS URL.
+    #[serde(rename = "config.acme.directory_url_invalid")]
+    AcmeDirectoryUrlInvalid,
+    /// A certificate is ordered from an ACME server whose terms nobody has
+    /// accepted.
+    #[serde(rename = "config.acme.terms_not_accepted")]
+    AcmeTermsNotAccepted,
+    /// A certificate uses HTTP-01 with nothing listening where the challenge
+    /// is asked for.
+    #[serde(rename = "config.acme.no_http01_listener")]
+    AcmeNoHttp01Listener,
 }
 
 impl WarningCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 7] = [
         Self::FrontendUnreachableRoutingRule,
         Self::CertificateExpired,
         Self::CertificateChainIncomplete,
+        Self::AcmeMissing,
+        Self::AcmeDirectoryUrlInvalid,
+        Self::AcmeTermsNotAccepted,
+        Self::AcmeNoHttp01Listener,
     ];
 
     /// Returns the translation key this code is looked up under.
@@ -1063,6 +1195,10 @@ impl WarningCode {
             Self::FrontendUnreachableRoutingRule => "config.frontend.unreachable_routing_rule",
             Self::CertificateExpired => "certificate.expired",
             Self::CertificateChainIncomplete => "certificate.chain.incomplete",
+            Self::AcmeMissing => "config.acme.missing",
+            Self::AcmeDirectoryUrlInvalid => "config.acme.directory_url_invalid",
+            Self::AcmeTermsNotAccepted => "config.acme.terms_not_accepted",
+            Self::AcmeNoHttp01Listener => "config.acme.no_http01_listener",
         }
     }
 }
@@ -1123,6 +1259,7 @@ impl ValidationWarning {
 pub fn inspect(config: &Config) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
     check_unreachable_rules(config, &mut warnings);
+    warnings.extend(acme_faults(config, None));
     warnings
 }
 

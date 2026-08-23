@@ -281,6 +281,37 @@ fn bare(code: u16) -> Option<ResponseHeader> {
     Some(header)
 }
 
+/// Answers an ACME HTTP-01 challenge.
+///
+/// The value goes out as plain text, which is what RFC 8555 section 8.3 says
+/// and what the server reads. It is written here rather than proxied to a
+/// backend, because no backend knows it: it is produced by the account key
+/// this process holds.
+async fn answer_challenge(session: &mut Session, value: &str) {
+    let Ok(mut header) = ResponseHeader::build(200, Some(2)) else {
+        return;
+    };
+    if header
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
+        .is_err()
+        || header
+            .insert_header(http::header::CONTENT_LENGTH, value.len().to_string())
+            .is_err()
+    {
+        return;
+    }
+    if session
+        .write_response_header(Box::new(header), false)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = session
+        .write_response_body(Some(bytes::Bytes::from(value.to_owned())), true)
+        .await;
+}
+
 #[async_trait]
 impl ProxyHttp for Proxy {
     type CTX = RequestContext;
@@ -347,6 +378,27 @@ impl ProxyHttp for Proxy {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let path = session.req_header().uri.path().to_owned();
+
+        // Before routing, so no rule an operator wrote can take the path away
+        // from the order that is waiting on it. Only the listener the ACME
+        // server actually asks is affected; anywhere else this returns
+        // `Elsewhere` and the request routes as usual (ADR-0026).
+        match crate::challenge::reply(&live.challenges, frontend.port, &path) {
+            crate::challenge::Reply::Answer(value) => {
+                answer_challenge(session, value).await;
+                return Ok(true);
+            }
+            crate::challenge::Reply::Unknown => {
+                // A token nobody is waiting on. Said plainly rather than
+                // routed onward, because a backend answering this path would
+                // be answering for the certificate authority.
+                if let Some(header) = bare(404) {
+                    answer(session, header).await;
+                }
+                return Ok(true);
+            }
+            crate::challenge::Reply::Elsewhere => {}
+        }
 
         let (name, request_limit) = match decide(frontend, asked_for.as_deref(), &path) {
             Decision::Redirect(code) => {

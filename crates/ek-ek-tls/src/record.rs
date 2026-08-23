@@ -41,8 +41,18 @@ pub fn key_id(certificate: &CertificateId) -> SecretId {
 /// The names come from the certificate itself and are never typed by an
 /// operator, because a name that does not match the certificate is a
 /// handshake that fails for one host and works for the others (T-025).
+///
+/// The source is passed in rather than assumed. The same material arrives from
+/// an operator's upload and from an ACME order, and the record has to say
+/// which, because renewal reads it: a certificate filed as an upload is never
+/// renewed, and one filed as ACME is (ADR-0026).
 #[must_use]
-pub fn install(state: &Snapshot, id: &CertificateId, upload: Upload) -> Snapshot {
+pub fn install(
+    state: &Snapshot,
+    id: &CertificateId,
+    source: CertificateSource,
+    upload: Upload,
+) -> Snapshot {
     let Upload {
         sni_names,
         validity,
@@ -54,7 +64,7 @@ pub fn install(state: &Snapshot, id: &CertificateId, upload: Upload) -> Snapshot
     let record = Certificate {
         id: id.clone(),
         sni_names,
-        source: CertificateSource::ManualUpload,
+        source,
         validity: Some(validity),
         chain: Some(chain_id(id)),
         private_key: Some(key_id(id)),
