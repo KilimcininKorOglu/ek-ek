@@ -75,6 +75,7 @@ fn snapshot(config: Config) -> Snapshot {
     Snapshot {
         config,
         secrets: BTreeMap::new(),
+        cluster: None,
     }
 }
 

@@ -563,6 +563,7 @@ fn a_failed_write_leaves_the_history_alone() {
             &Snapshot {
                 config: config(1),
                 secrets: BTreeMap::new(),
+                cluster: None,
             },
             &change("admin", "second"),
         )

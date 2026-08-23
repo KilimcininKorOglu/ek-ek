@@ -32,6 +32,14 @@ RULES = [
     # does (ADR-0002).
     ("ek-ek-tls", "ek-ek-dataplane", "the upload path must not pull in the traffic path"),
     ("ek-ek-tls", "ek-ek-vrrp", "certificates have nothing to do with VRRP"),
+    # Peer trust and the certificates an operator uploads are separate trust
+    # domains (ADR-0008). The separation is only real if the build refuses to
+    # let one reach the other, so it is a rule in both directions (ADR-0082).
+    ("ek-ek-peer", "ek-ek-tls", "the cluster CA is not the certificate an operator uploads"),
+    ("ek-ek-tls", "ek-ek-peer", "an uploaded certificate has nothing to do with peer trust"),
+    ("ek-ek-peer", "ek-ek-dataplane", "peer trust must not reach the traffic path"),
+    ("ek-ek-peer", "ek-ek-vrrp", "peer trust has nothing to do with VRRP"),
+    ("ek-ek-config", "ek-ek-peer", "the config model is the base layer"),
 ]
 
 # Crates that must depend on no workspace crate at all.

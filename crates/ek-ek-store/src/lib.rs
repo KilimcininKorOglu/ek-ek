@@ -44,7 +44,16 @@
 //! live here and are sealed with the node's own master key before they touch
 //! the disk (ADR-0018). The key is generated on this node, kept readable by
 //! its owner alone, and never replicated.
+//!
+//! # What is not configuration
+//!
+//! [`ClusterIdentity`] sits beside the config in a [`Snapshot`] rather than
+//! inside it. Nobody writes it by hand, validation says nothing about it, and
+//! it must not travel with the version log: rolling a configuration back to
+//! last week must not roll back the authority every peer connection depends on
+//! (ADR-0082).
 
+pub mod cluster;
 pub mod crypto;
 pub mod diff;
 pub mod error;
@@ -55,6 +64,7 @@ pub mod sqlite;
 pub mod store;
 pub mod version;
 
+pub use cluster::ClusterIdentity;
 pub use crypto::Sealed;
 pub use diff::{ConfigDiff, DiffEntry, ObjectChange, ObjectKind, diff};
 pub use error::{Error, ErrorKind, Result};

@@ -537,6 +537,7 @@ fn writing_an_empty_secret_map_clears_what_was_there() {
             &Snapshot {
                 config: config(1),
                 secrets: BTreeMap::new(),
+                cluster: None,
             },
             &change(),
         )

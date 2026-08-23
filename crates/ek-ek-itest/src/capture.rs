@@ -17,6 +17,17 @@ use crate::node::{Background, Node};
 /// The interface the lab network sits on.
 const LAB: &str = "eth0";
 
+/// How much of each packet a capture prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Link and protocol headers only.
+    Headers,
+    /// Headers plus the fields tcpdump only prints when asked.
+    Verbose,
+    /// Headers plus the bytes the packet carries, as text.
+    Payload,
+}
+
 /// A running capture on one node.
 pub struct Capture {
     running: Background,
@@ -33,7 +44,7 @@ impl Capture {
     /// capture stops on its own after `packets` frames or `window`, whichever
     /// comes first, so a test can never leave one behind.
     pub fn start(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
-        Self::run(node, LAB, filter, packets, window, false)
+        Self::run(node, LAB, filter, packets, window, Shape::Headers)
     }
 
     /// Starts a capture on an interface other than the lab one.
@@ -48,7 +59,7 @@ impl Capture {
         packets: usize,
         window: Duration,
     ) -> Result<Self> {
-        Self::run(node, interface, filter, packets, window, false)
+        Self::run(node, interface, filter, packets, window, Shape::Headers)
     }
 
     /// Starts a capture that prints what is inside each packet.
@@ -59,7 +70,16 @@ impl Capture {
     /// detail changes every line, and a measurement that matches on text
     /// should choose which shape it is reading.
     pub fn verbose(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
-        Self::run(node, LAB, filter, packets, window, true)
+        Self::run(node, LAB, filter, packets, window, Shape::Verbose)
+    }
+
+    /// Starts a capture that prints the bytes each packet carries.
+    ///
+    /// The only way to answer "is this readable on the wire?". A header tells
+    /// you a packet went somewhere; the payload is what says whether anybody
+    /// between the two nodes can read what was in it.
+    pub fn payload(node: &Node, filter: &str, packets: usize, window: Duration) -> Result<Self> {
+        Self::run(node, LAB, filter, packets, window, Shape::Payload)
     }
 
     fn run(
@@ -68,14 +88,16 @@ impl Capture {
         filter: &str,
         packets: usize,
         window: Duration,
-        verbose: bool,
+        shape: Shape,
     ) -> Result<Self> {
         let seconds = window.as_secs().max(1).to_string();
         let mut argv = vec![
             "timeout", &seconds, "tcpdump", "-i", interface, "-n", "-l", "-e",
         ];
-        if verbose {
-            argv.push("-v");
+        match shape {
+            Shape::Headers => {}
+            Shape::Verbose => argv.push("-v"),
+            Shape::Payload => argv.push("-A"),
         }
         let count = packets.to_string();
         argv.push("-c");

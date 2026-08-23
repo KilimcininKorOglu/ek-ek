@@ -23,6 +23,9 @@ ek-ek-log = { workspace = true }
 ek-ek-ipc = { workspace = true }
 # `acme` obtains a certificate and files it. The order flow and the store are
 # what it needs; the traffic path is a separate process and is not involved.
+# `cluster` creates the authority every node's peer certificate comes from and
+# opens the channel those certificates authenticate.
+ek-ek-peer = { workspace = true }
 ek-ek-store = { workspace = true }
 ek-ek-tls = { workspace = true }
 # `acme` reads its own listener back before telling the certificate authority

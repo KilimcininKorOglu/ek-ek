@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod acme;
+mod cluster;
 mod renew;
 mod report;
 mod secret;
@@ -49,6 +50,112 @@ enum Command {
     /// Work with the credentials the configuration refers to
     #[command(subcommand)]
     Secret(SecretCommand),
+
+    /// Work with the authority every node's peer certificate comes from
+    #[command(subcommand)]
+    Cluster(ClusterCommand),
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Create the cluster authority. Run once, on the first node
+    Init(ClusterInitArgs),
+
+    /// Print the authority's fingerprint, as a join token carries it
+    Fingerprint(ClusterFingerprintArgs),
+
+    /// Sign a peer certificate for one node, or keep the one it has
+    Enroll(ClusterEnrollArgs),
+
+    /// Answer peers on the peer port
+    Serve(ClusterServeArgs),
+
+    /// Ask one peer whether it is there
+    Ping(ClusterPingArgs),
+}
+
+#[derive(Args)]
+struct ClusterInitArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// Configuration document to start an empty store from
+    #[arg(long)]
+    config: Option<String>,
+}
+
+#[derive(Args)]
+struct ClusterFingerprintArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+}
+
+#[derive(Args)]
+struct ClusterEnrollArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// Identity of the node the certificate is for
+    #[arg(long)]
+    node: String,
+
+    /// Address to carry beside the identity. May be given more than once
+    #[arg(long = "address")]
+    addresses: Vec<String>,
+
+    /// Directory to write the certificate, the key and the authority to
+    #[arg(long)]
+    out_dir: String,
+
+    /// Decide against this moment, in seconds since the epoch, instead of the
+    /// system clock. Answers "what is due later?" without waiting for later
+    #[arg(long)]
+    now: Option<i64>,
+
+    /// Sign again even when the certificate on disk is not due yet
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args)]
+struct ClusterServeArgs {
+    /// Address to listen on
+    #[arg(long, default_value_t = format!("0.0.0.0:{}", ek_ek_peer::DEFAULT_PORT))]
+    listen: String,
+
+    /// Identity of this node
+    #[arg(long)]
+    node: String,
+
+    /// Directory holding the certificate, the key and the authority
+    #[arg(long)]
+    material: String,
+
+    /// How many peers to answer before stopping
+    #[arg(long, default_value_t = 1)]
+    connections: u32,
+}
+
+#[derive(Args)]
+struct ClusterPingArgs {
+    /// Address to dial
+    #[arg(long)]
+    to: String,
+
+    /// Identity the peer must prove it has
+    #[arg(long)]
+    expect: String,
+
+    /// Identity of this node
+    #[arg(long)]
+    node: String,
+
+    /// Directory holding the certificate, the key and the authority
+    #[arg(long)]
+    material: String,
 }
 
 #[derive(Subcommand)]
@@ -172,6 +279,43 @@ fn main() -> ExitCode {
                 id: &args.id,
                 from_file: &args.from_file,
                 config: args.config.as_deref(),
+            });
+        }
+        Command::Cluster(ClusterCommand::Init(args)) => {
+            return cluster::init(&cluster::InitArguments {
+                data_dir: &args.data_dir,
+                config: args.config.as_deref(),
+            });
+        }
+        Command::Cluster(ClusterCommand::Fingerprint(args)) => {
+            return cluster::fingerprint(&cluster::FingerprintArguments {
+                data_dir: &args.data_dir,
+            });
+        }
+        Command::Cluster(ClusterCommand::Enroll(args)) => {
+            return cluster::enroll(&cluster::EnrollArguments {
+                data_dir: &args.data_dir,
+                node: &args.node,
+                addresses: &args.addresses,
+                out_dir: &args.out_dir,
+                at: args.now,
+                force: args.force,
+            });
+        }
+        Command::Cluster(ClusterCommand::Serve(args)) => {
+            return cluster::serve(&cluster::ServeArguments {
+                listen: &args.listen,
+                node: &args.node,
+                material: &args.material,
+                connections: args.connections,
+            });
+        }
+        Command::Cluster(ClusterCommand::Ping(args)) => {
+            return cluster::ping(&cluster::PingArguments {
+                to: &args.to,
+                expect: &args.expect,
+                node: &args.node,
+                material: &args.material,
             });
         }
     }

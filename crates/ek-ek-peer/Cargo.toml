@@ -1,0 +1,33 @@
+[package]
+name = "ek-ek-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
+description = "Cluster certificate authority and the mutually authenticated channel between nodes"
+
+[dependencies]
+# Node identities come from the config model. A peer certificate names a node,
+# and the name is the one other objects already reference.
+ek-ek-config = { workspace = true }
+# The CA private key is a stored secret, sealed with the node's own master key
+# (ADR-0018), so the authority ends as a store state exactly as an uploaded
+# certificate does.
+ek-ek-store = { workspace = true }
+# The same library the rest of the tree speaks TLS with (ADR-0068). A second
+# one would let the two sides disagree about what a certificate is.
+openssl = { workspace = true }
+# The peer protocol is one JSON object per line, following ek-ek-ipc.
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+# The measurements write a store to disk, to read back what really landed
+# there.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

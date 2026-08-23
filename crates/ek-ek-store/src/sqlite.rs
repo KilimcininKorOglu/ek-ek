@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ek_ek_config::{Config, SchemaVersion, SecretId};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::cluster::ClusterIdentity;
 use crate::crypto::{Sealed, open, seal};
 use crate::error::{Error, ErrorKind, Result};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
@@ -363,7 +364,20 @@ impl Store for SqliteStore {
             secrets.insert(SecretId::new(id), Secret::new(plaintext));
         }
 
-        Ok(Some(Snapshot { config, secrets }))
+        let authority_pem: Option<String> = connection
+            .query_row(
+                "SELECT authority_pem FROM cluster_identity WHERE id = ?1",
+                [STATE_ROW],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage("the cluster identity could not be read"))?;
+
+        Ok(Some(Snapshot {
+            config,
+            secrets,
+            cluster: authority_pem.map(ClusterIdentity::new),
+        }))
     }
 
     fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId> {
@@ -430,6 +444,24 @@ impl SqliteStore {
                 ],
             )
             .map_err(storage("the config could not be written"))?;
+
+        // Replaced whole, exactly as the secrets above are. The authority
+        // certificate and the key that signs with it have to move together: a
+        // certificate that survived a write its key did not would be half an
+        // authority, which nothing can use and nothing would report.
+        transaction
+            .execute("DELETE FROM cluster_identity", [])
+            .map_err(storage(
+                "the previous cluster identity could not be replaced",
+            ))?;
+        if let Some(cluster) = &snapshot.cluster {
+            transaction
+                .execute(
+                    "INSERT INTO cluster_identity (id, authority_pem) VALUES (?1, ?2)",
+                    rusqlite::params![STATE_ROW, cluster.authority_pem],
+                )
+                .map_err(storage("the cluster identity could not be written"))?;
+        }
 
         let version = append_version(&transaction, &document, snapshot, change, restored, now)?;
         prune(&transaction, change, now)?;
@@ -546,6 +578,7 @@ impl History for SqliteStore {
         let snapshot = Snapshot {
             config,
             secrets: current.secrets,
+            cluster: current.cluster,
         };
         self.write_version(&snapshot, change, Some(id))
     }
@@ -790,6 +823,11 @@ CREATE TABLE IF NOT EXISTS secret (
     id         TEXT PRIMARY KEY,
     nonce      BLOB NOT NULL,
     ciphertext BLOB NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS cluster_identity (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    authority_pem TEXT    NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS audit_log (

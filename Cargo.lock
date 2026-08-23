@@ -669,6 +669,7 @@ dependencies = [
  "ek-ek-dataplane",
  "ek-ek-ipc",
  "ek-ek-log",
+ "ek-ek-peer",
  "ek-ek-store",
  "ek-ek-tls",
  "h2",
@@ -744,6 +745,19 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ek-ek-peer"
+version = "0.1.0"
+dependencies = [
+ "ek-ek-config",
+ "ek-ek-store",
+ "log",
+ "openssl",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

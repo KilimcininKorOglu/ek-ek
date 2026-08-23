@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use ek_ek_config::{Config, SecretId};
 
+use crate::cluster::ClusterIdentity;
 use crate::error::Result;
 use crate::secret::Secret;
 use crate::version::{Change, VersionId};
@@ -26,6 +27,19 @@ pub struct Snapshot {
     pub config: Config,
     /// Key material, keyed by the identity the config refers to.
     pub secrets: BTreeMap<SecretId, Secret>,
+    /// Who the cluster is, when it has been bootstrapped.
+    ///
+    /// Written whole like everything else here: a state carrying `None` is a
+    /// node with no cluster authority, and writing one removes what was
+    /// stored. Every caller reads the state before it writes one, which is the
+    /// same rule the key material already lives by, and the one thing that
+    /// must not happen is the authority certificate and its key parting
+    /// company (ADR-0082).
+    ///
+    /// What keeps a rollback from taking the authority with it is that the
+    /// identity is not in the config document at all: `roll_back_to` restores
+    /// a document and carries this field forward untouched.
+    pub cluster: Option<ClusterIdentity>,
 }
 
 impl Snapshot {
@@ -35,6 +49,7 @@ impl Snapshot {
         Self {
             config,
             secrets: BTreeMap::new(),
+            cluster: None,
         }
     }
 
@@ -42,6 +57,13 @@ impl Snapshot {
     #[must_use]
     pub fn with_secret(mut self, id: SecretId, secret: Secret) -> Self {
         self.secrets.insert(id, secret);
+        self
+    }
+
+    /// Says who the cluster is.
+    #[must_use]
+    pub fn with_cluster(mut self, identity: ClusterIdentity) -> Self {
+        self.cluster = Some(identity);
         self
     }
 }
