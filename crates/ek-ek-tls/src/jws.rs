@@ -168,6 +168,29 @@ pub fn key_authorization(token: &str, thumbprint: &str) -> String {
     format!("{token}.{thumbprint}")
 }
 
+/// The value a DNS-01 challenge record carries.
+///
+/// The digest of the key authorization rather than the authorization itself
+/// (RFC 8555 section 8.4). A TXT record holds 255 bytes per string, and a
+/// fixed 43 byte value fits every name whatever the thumbprint is.
+///
+/// # Errors
+///
+/// Returns [`Reason::Crypto`] when the digest cannot be computed.
+pub fn record_value(token: &str, thumbprint: &str) -> Result<String, Failure> {
+    let digest = hash(
+        MessageDigest::sha256(),
+        key_authorization(token, thumbprint).as_bytes(),
+    )
+    .map_err(|error| {
+        Failure::new(
+            Reason::Crypto,
+            format!("the challenge answer could not be digested: {error}"),
+        )
+    })?;
+    Ok(base64url(&digest))
+}
+
 /// How the account is named in a signed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Identify {

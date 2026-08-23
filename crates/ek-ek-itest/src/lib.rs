@@ -23,7 +23,8 @@ mod node;
 
 pub use capture::{Capture, CaptureResult};
 pub use cluster::{
-    Cluster, LAB_NAME, MAIL_PLAIN_PORT, MAIL_PROXIED_PORT, PEBBLE_DIRECTORY, VIP_RANGE,
+    Cluster, LAB_NAME, LAB_TSIG_KEY, LAB_WILDCARD, LAB_ZONE, MAIL_PLAIN_PORT, MAIL_PROXIED_PORT,
+    PEBBLE_DIRECTORY, VIP_RANGE,
 };
 pub use error::{Error, Result};
 pub use load::LoadReport;

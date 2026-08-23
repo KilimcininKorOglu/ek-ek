@@ -39,6 +39,19 @@ const PEBBLE_ROOT: &str = "/test/certs/pebble.minica.pem";
 /// An ACME identifier is a domain name, and a single label is not one. This is
 /// a network alias on the node, so the ACME server's own resolver answers it.
 pub const LAB_NAME: &str = "node1.ek-ek.test";
+/// The lab's name server, which is authoritative for the zone below.
+const BIND: (&str, u8) = ("bind", 42);
+/// The zone the name server answers for, and the one an update writes into.
+pub const LAB_ZONE: &str = "ek-ek.test";
+/// The name of the shared key the name server accepts updates signed with.
+pub const LAB_TSIG_KEY: &str = "ek-ek-update";
+/// A wildcard name inside the lab zone, for measuring what only DNS-01 gets.
+pub const LAB_WILDCARD: &str = "*.ek-ek.test";
+/// Where the name server leaves the key it generated at start.
+///
+/// Regenerated on every start and never tracked: a shared key in a repository
+/// is a credential published from the first commit.
+const TSIG_SECRET_FILE: &str = "docker-data/bind/tsig.secret";
 const BUILDER: &str = "builder";
 const BUILDERS: usize = 1;
 const LAB_PREFIX: [u8; 3] = [172, 28, 0];
@@ -144,6 +157,37 @@ impl Cluster {
             ));
         }
         Ok(pem)
+    }
+
+    /// Address of the lab's name server.
+    pub fn bind_address(&self) -> Ipv4Addr {
+        lab_address(BIND.1)
+    }
+
+    /// The shared key the name server accepts updates signed with.
+    ///
+    /// Read from what the container wrote at start, so a measurement uses the
+    /// key that server actually holds rather than one written down somewhere.
+    pub fn tsig_secret(&self) -> Result<String> {
+        let path = repo_root().join(TSIG_SECRET_FILE);
+        let held = std::fs::read_to_string(&path)
+            .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+        let held = held.trim().to_owned();
+        if held.is_empty() {
+            return Err(Error::new(format!(
+                "{} holds no key; the name server may not have started",
+                path.display()
+            )));
+        }
+        Ok(held)
+    }
+
+    /// Everything the name server has logged, newest lines last.
+    ///
+    /// It records every update it accepted or refused, which is the reading of
+    /// a dynamic update that comes from outside this project.
+    pub fn bind_log(&self, lines: usize) -> Result<String> {
+        compose_output(&["logs", "--tail", &lines.to_string(), BIND.0])
     }
 
     /// Everything the ACME test server has logged, newest lines last.

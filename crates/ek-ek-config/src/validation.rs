@@ -76,6 +76,12 @@ pub enum ErrorCode {
     /// A certificate is still offered by a frontend.
     #[serde(rename = "config.certificate.in_use")]
     CertificateInUse,
+    /// A DNS provider is given no time at all to publish its record.
+    #[serde(rename = "config.dns_provider.propagation_timeout_zero")]
+    DnsProviderPropagationTimeoutZero,
+    /// A DNS provider's API address is not one a token may be sent to.
+    #[serde(rename = "config.dns_provider.api_base_invalid")]
+    DnsProviderApiBaseInvalid,
     /// The uploaded chain is not readable as PEM.
     #[serde(rename = "certificate.chain.unreadable")]
     CertificateChainUnreadable,
@@ -128,7 +134,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::DuplicateId,
         Self::FrontendDuplicateBinding,
         Self::FrontendUnknownVip,
@@ -143,6 +149,8 @@ impl ErrorCode {
         Self::VipTooMany,
         Self::CertificateUnknownDnsProvider,
         Self::CertificateInUse,
+        Self::DnsProviderPropagationTimeoutZero,
+        Self::DnsProviderApiBaseInvalid,
         Self::CertificateChainUnreadable,
         Self::CertificateChainEmpty,
         Self::CertificateChainTooLong,
@@ -181,6 +189,10 @@ impl ErrorCode {
             Self::VipTooMany => "config.vip.too_many",
             Self::CertificateUnknownDnsProvider => "config.certificate.unknown_dns_provider",
             Self::CertificateInUse => "config.certificate.in_use",
+            Self::DnsProviderPropagationTimeoutZero => {
+                "config.dns_provider.propagation_timeout_zero"
+            }
+            Self::DnsProviderApiBaseInvalid => "config.dns_provider.api_base_invalid",
             Self::CertificateChainUnreadable => "certificate.chain.unreadable",
             Self::CertificateChainEmpty => "certificate.chain.empty",
             Self::CertificateChainTooLong => "certificate.chain.too_long",
@@ -398,6 +410,7 @@ pub fn validate(config: &Config) -> Result<(), ValidationErrors> {
     check_redirects(config, &mut errors);
     check_vips(config, &mut errors);
     check_certificates(config, &mut errors);
+    check_dns_providers(config, &mut errors);
     check_backends(config, &mut errors);
     check_stickiness_against_transport(config, &mut errors);
     check_stickiness_key(config, &mut errors);
@@ -823,6 +836,50 @@ fn check_certificates(config: &Config, errors: &mut Vec<ValidationError>) {
     }
 }
 
+fn check_dns_providers(config: &Config, errors: &mut Vec<ValidationError>) {
+    for (at, provider) in config.dns_providers.iter().enumerate() {
+        let here = || FieldPath::root().field("dns_providers").index(at);
+
+        // Zero is not "do not wait": the record is written and the server is
+        // told to check before anything can have picked it up, which is the
+        // one failure no retry undoes (ADR-0026).
+        if provider.propagation_timeout_secs == 0 {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::DnsProviderPropagationTimeoutZero,
+                    here().field("propagation_timeout_secs"),
+                )
+                .with_id("provider", provider.id.as_str()),
+            );
+        }
+
+        // An API token is a bearer credential. Sending it anywhere but over
+        // TLS hands it to whoever is on the path.
+        if let crate::certificate::DnsProviderConnection::Cloudflare { api_base, .. } =
+            &provider.connection
+            && !api_base.is_empty()
+            && !api_base.starts_with("https://")
+        {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::DnsProviderApiBaseInvalid,
+                    here().field("connection").field("api_base"),
+                )
+                .with_id("provider", provider.id.as_str()),
+            );
+        }
+    }
+}
+
+/// Whether a name covers more than itself.
+///
+/// Only the leading label counts. RFC 8555 issues nothing else, and a name
+/// with a star anywhere further along is not a wildcard at all.
+#[must_use]
+fn is_wildcard(name: &str) -> bool {
+    name.starts_with("*.")
+}
+
 /// The port an ACME server asks the HTTP-01 challenge on.
 ///
 /// Fixed by RFC 8555: the server connects to port 80 and follows redirects
@@ -930,6 +987,20 @@ pub fn acme_faults(config: &Config, only: Option<&CertificateId>) -> Vec<Validat
                 ValidationWarning::new(WarningCode::AcmeNoHttp01Listener, here(*at))
                     .with_id("certificate", certificate.id.as_str())
                     .with_number("port", i64::from(HTTP01_PORT)),
+            );
+        }
+    }
+
+    // A wildcard is only ever issued against a DNS-01 authorization. The
+    // server offers no other challenge for it, so the order would fail at the
+    // authorization with nothing an operator could read as a cause.
+    for (at, certificate) in &ordered {
+        if certificate.source == CertificateSource::AcmeHttp01
+            && certificate.sni_names.iter().any(|name| is_wildcard(name))
+        {
+            warnings.push(
+                ValidationWarning::new(WarningCode::AcmeWildcardNeedsDns01, here(*at))
+                    .with_id("certificate", certificate.id.as_str()),
             );
         }
     }
@@ -1174,11 +1245,17 @@ pub enum WarningCode {
     /// is asked for.
     #[serde(rename = "config.acme.no_http01_listener")]
     AcmeNoHttp01Listener,
+    /// A certificate covers a wildcard name and is ordered with HTTP-01.
+    ///
+    /// RFC 8555 issues a wildcard only against a DNS-01 authorization, so the
+    /// server never offers the challenge this certificate would answer.
+    #[serde(rename = "config.acme.wildcard_needs_dns01")]
+    AcmeWildcardNeedsDns01,
 }
 
 impl WarningCode {
     /// Every code, so a test can check the whole set at once.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::FrontendUnreachableRoutingRule,
         Self::CertificateExpired,
         Self::CertificateChainIncomplete,
@@ -1186,6 +1263,7 @@ impl WarningCode {
         Self::AcmeDirectoryUrlInvalid,
         Self::AcmeTermsNotAccepted,
         Self::AcmeNoHttp01Listener,
+        Self::AcmeWildcardNeedsDns01,
     ];
 
     /// Returns the translation key this code is looked up under.
@@ -1199,6 +1277,7 @@ impl WarningCode {
             Self::AcmeDirectoryUrlInvalid => "config.acme.directory_url_invalid",
             Self::AcmeTermsNotAccepted => "config.acme.terms_not_accepted",
             Self::AcmeNoHttp01Listener => "config.acme.no_http01_listener",
+            Self::AcmeWildcardNeedsDns01 => "config.acme.wildcard_needs_dns01",
         }
     }
 }

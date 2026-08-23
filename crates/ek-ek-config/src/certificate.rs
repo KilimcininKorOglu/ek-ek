@@ -75,6 +75,23 @@ pub struct DnsProvider {
     pub id: DnsProviderId,
     /// Provider type and its connection parameters.
     pub connection: DnsProviderConnection,
+    /// How long the challenge record is given to become visible, in seconds.
+    ///
+    /// A property of the provider rather than of the installation: an internal
+    /// BIND answers with the record in the same second, and a hosted zone can
+    /// take minutes. Missing from an older document, which then gets the
+    /// default (ADR-0019).
+    #[serde(default = "default_propagation_timeout_secs")]
+    pub propagation_timeout_secs: u32,
+}
+
+/// How long a challenge record is given to become visible by default.
+///
+/// Long enough for a hosted zone that is not instant, short enough that a
+/// record which will never appear ends the attempt rather than holding it.
+#[must_use]
+pub const fn default_propagation_timeout_secs() -> u32 {
+    120
 }
 
 /// How the product reaches a DNS provider.
@@ -105,8 +122,19 @@ pub enum DnsProviderConnection {
         zone_id: String,
         /// Reference to the stored API token.
         api_token: SecretId,
+        /// Where the API lives, for a Cloudflare compatible endpoint.
+        ///
+        /// Empty means Cloudflare itself, which is what almost every
+        /// installation wants. A value here is for a proxy in front of the
+        /// API, and for the test environment, which must never reach the real
+        /// one.
+        #[serde(default)]
+        api_base: String,
     },
 }
+
+/// Where Cloudflare's own API lives.
+pub const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
 /// Algorithm a TSIG signature uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

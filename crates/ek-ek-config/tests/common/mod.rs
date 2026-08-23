@@ -78,13 +78,16 @@ pub fn sample() -> Config {
                     tsig_algorithm: TsigAlgorithm::HmacSha256,
                     tsig_secret: SecretId::new("tsig-acme-update"),
                 },
+                propagation_timeout_secs: ek_ek_config::default_propagation_timeout_secs(),
             },
             DnsProvider {
                 id: DnsProviderId::new("dns-cloudflare"),
                 connection: DnsProviderConnection::Cloudflare {
                     zone_id: "0123456789abcdef".to_owned(),
                     api_token: SecretId::new("cloudflare-token"),
+                    api_base: String::new(),
                 },
+                propagation_timeout_secs: ek_ek_config::default_propagation_timeout_secs(),
             },
         ],
         acme: Some(AcmeSettings {

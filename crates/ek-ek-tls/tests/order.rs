@@ -10,7 +10,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use ek_ek_tls::{Answer, Ask, Flow, Identify, MOST_POLLS, Progress};
+use ek_ek_tls::{Answer, Ask, Challenge, Flow, Identify, MOST_POLLS, Progress};
 
 const DIRECTORY: &str = "https://acme.example.org/dir";
 const NONCE_URL: &str = "https://acme.example.org/nonce";
@@ -32,6 +32,7 @@ fn flow() -> Flow {
         THUMBPRINT,
         "yonetici@example.org",
         "Q1NSCg",
+        Challenge::Http01,
     )
 }
 
@@ -93,6 +94,7 @@ fn the_flow_asks_the_directory_the_configuration_names() {
         THUMBPRINT,
         "",
         "Q1NSCg",
+        Challenge::Http01,
     );
     assert_eq!(
         other.next().expect("an ask").url(),
@@ -171,10 +173,10 @@ fn the_challenge_answer_is_the_token_tied_to_the_account_key() {
     let mut flow = flow();
     up_to_publication(&mut flow);
 
-    assert_eq!(flow.published().len(), 1);
+    assert_eq!(flow.published().entries.len(), 1);
     assert_eq!(
-        flow.published().get(TOKEN).map(String::as_str),
-        Some(format!("{TOKEN}.{THUMBPRINT}").as_str()),
+        flow.published().entries.get(TOKEN).map(Vec::as_slice),
+        Some([format!("{TOKEN}.{THUMBPRINT}")].as_slice()),
         "anybody who saw the token could answer if it were not tied to the key"
     );
 
@@ -243,7 +245,7 @@ fn a_token_that_could_name_a_deeper_path_is_refused() {
 fn the_answer_is_taken_away_once_the_certificate_is_in_hand() {
     let mut flow = flow();
     up_to_publication(&mut flow);
-    assert_eq!(flow.published().len(), 1);
+    assert_eq!(flow.published().entries.len(), 1);
 
     moved(&mut flow, &Answer::new(200, "{}", None));
     moved(&mut flow, &Answer::new(200, order_body("ready"), None));
@@ -259,7 +261,7 @@ fn the_answer_is_taken_away_once_the_certificate_is_in_hand() {
 
     // Still published while the certificate is being collected: the server may
     // check again until the order is closed.
-    assert_eq!(flow.published().len(), 1);
+    assert_eq!(flow.published().entries.len(), 1);
 
     moved(
         &mut flow,
@@ -282,7 +284,7 @@ fn the_answer_is_taken_away_once_the_certificate_is_in_hand() {
 fn giving_up_takes_the_answer_away_too() {
     let mut flow = flow();
     up_to_publication(&mut flow);
-    assert_eq!(flow.published().len(), 1);
+    assert_eq!(flow.published().entries.len(), 1);
 
     flow.abandon();
 
@@ -428,6 +430,7 @@ fn every_name_asked_for_reaches_the_order() {
         THUMBPRINT,
         "",
         "Q1NSCg",
+        Challenge::Http01,
     );
     moved(&mut flow, &Answer::new(200, directory_body(), None));
     moved(&mut flow, &Answer::new(204, String::new(), None));

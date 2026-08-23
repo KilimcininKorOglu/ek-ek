@@ -23,11 +23,11 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ek_ek_config::{
-    ACCOUNT_KEY, CertificateId, CertificateSource, Config, SecretId, acme_faults, http01_listener,
-    validate,
+    ACCOUNT_KEY, CertificateId, CertificateSource, Config, DnsProvider, DnsProviderConnection,
+    SecretId, acme_faults, http01_listener, validate,
 };
 use ek_ek_store::{Change, Secret, Snapshot, SqliteStore, Store};
-use ek_ek_tls::{Failure, Reason};
+use ek_ek_tls::{Challenge, Failure, Publication, Reason};
 
 /// Everything the command was told.
 pub struct Arguments<'a> {
@@ -60,12 +60,19 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
         ));
     };
 
-    if record.source != CertificateSource::AcmeHttp01 {
-        return failed(&Failure::new(
-            Reason::Configuration,
-            format!("{} is not obtained with HTTP-01", arguments.certificate),
-        ));
-    }
+    let kind = match &record.source {
+        CertificateSource::AcmeHttp01 => Challenge::Http01,
+        CertificateSource::AcmeDns01 { .. } => Challenge::Dns01,
+        CertificateSource::ManualUpload => {
+            return failed(&Failure::new(
+                Reason::Configuration,
+                format!(
+                    "{} is uploaded by hand and is not ordered from anywhere",
+                    arguments.certificate
+                ),
+            ));
+        }
+    };
     if record.sni_names.is_empty() {
         return failed(&Failure::new(
             Reason::Configuration,
@@ -101,36 +108,52 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
         ));
     }
 
-    // Both are present, because `acme_faults` found nothing to say about
-    // either. Read again rather than assumed, so a future rule change cannot
-    // leave this reading a value nothing checked.
-    let (Some(settings), Some(listener)) = (config.acme.clone(), http01_listener(&config)) else {
+    // Present, because `acme_faults` found nothing to say about it. Read
+    // again rather than assumed, so a future rule change cannot leave this
+    // reading a value nothing checked.
+    let Some(settings) = config.acme.clone() else {
         return failed(&Failure::new(
             Reason::Configuration,
-            "the ACME settings and the port 80 listener must both be there".to_owned(),
-        ));
-    };
-    let Some(bound) = config
-        .vips
-        .iter()
-        .find(|vip| vip.id == listener.vip)
-        .map(|vip| SocketAddr::new(vip.address, listener.port))
-    else {
-        return failed(&Failure::new(
-            Reason::Configuration,
-            format!(
-                "{} is bound to a virtual address that is not defined",
-                listener.id.as_str()
-            ),
+            "the ACME settings must be there".to_owned(),
         ));
     };
 
+    let bound = match kind {
+        Challenge::Http01 => {
+            let Some(listener) = http01_listener(&config) else {
+                return failed(&Failure::new(
+                    Reason::Configuration,
+                    "the port 80 listener must be there".to_owned(),
+                ));
+            };
+            let Some(bound) = config
+                .vips
+                .iter()
+                .find(|vip| vip.id == listener.vip)
+                .map(|vip| SocketAddr::new(vip.address, listener.port))
+            else {
+                return failed(&Failure::new(
+                    Reason::Configuration,
+                    format!(
+                        "{} is bound to a virtual address that is not defined",
+                        listener.id.as_str()
+                    ),
+                ));
+            };
+            Some(bound)
+        }
+        // Nothing listens for a DNS-01 order. The certificate authority asks
+        // a name server, which is why this is the only way a name with no
+        // inbound path from the internet gets a certificate (ADR-0026).
+        Challenge::Dns01 => None,
+    };
+
     say(&format!(
-        r#"{{"kind":"acme","ts":{},"event":"ordering","certificate":"{}","names":{},"listener":"{}","directory":"{}"}}"#,
+        r#"{{"kind":"acme","ts":{},"event":"ordering","certificate":"{}","names":{},"challenge":"{}","directory":"{}"}}"#,
         now(),
         id.as_str(),
         list(&record.sni_names),
-        listener.id.as_str(),
+        kind.wire_name(),
         settings.directory_url
     ));
 
@@ -164,25 +187,39 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
     };
 
     let names = record.sni_names.clone();
-    // What was published last, so a withdrawal can be confirmed against the
-    // tokens that were actually live rather than against nothing.
-    let mut live: Vec<String> = Vec::new();
-    let mut publish = |challenges: &BTreeMap<String, String>| {
-        write_challenges(arguments.challenges, challenges)?;
-        // Confirmed before this returns, because the very next thing the order
-        // does is tell the certificate authority to come and read it. A server
-        // that arrives first reads a 404 and marks the name invalid, and that
-        // failure is not one a retry fixes (ADR-0026).
-        reachable(bound, challenges, &live)?;
-        live = challenges.keys().cloned().collect();
-        Ok(())
+    let source = record.source.clone();
+    let mut answering = match kind {
+        Challenge::Http01 => {
+            let Some(bound) = bound else {
+                return failed(&Failure::new(
+                    Reason::Configuration,
+                    "the port 80 listener must be there".to_owned(),
+                ));
+            };
+            Answering::Http01 {
+                listener: bound,
+                file: arguments.challenges,
+                live: Vec::new(),
+            }
+        }
+        Challenge::Dns01 => match dns_provider(&config, &state, &record.source) {
+            Ok((provider, secret)) => Answering::Dns01 {
+                provider,
+                secret,
+                live: Vec::new(),
+            },
+            Err(failure) => return failed(&failure),
+        },
     };
+
+    let mut publish = |publication: &Publication| answering.apply(publication);
     let mut pause = |wait: std::time::Duration| std::thread::sleep(wait);
 
-    let obtained = match ek_ek_tls::obtain(&settings, &account, &names, &mut publish, &mut pause) {
-        Ok(obtained) => obtained,
-        Err(failure) => return failed(&failure),
-    };
+    let obtained =
+        match ek_ek_tls::obtain(&settings, &account, &names, kind, &mut publish, &mut pause) {
+            Ok(obtained) => obtained,
+            Err(failure) => return failed(&failure),
+        };
 
     say(&format!(
         r#"{{"kind":"acme","ts":{},"event":"obtained","certificate":"{}"}}"#,
@@ -211,7 +248,7 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
         ));
     }
 
-    let next = ek_ek_tls::install(&state, &id, CertificateSource::AcmeHttp01, upload);
+    let next = ek_ek_tls::install(&state, &id, source, upload);
     if let Err(error) = store.write(
         &next,
         &Change::new("acme", format!("{} obtained", id.as_str())),
@@ -239,6 +276,162 @@ pub fn order(arguments: &Arguments<'_>) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Where a challenge answer is put so the certificate authority can read it.
+///
+/// One type for both, because the rule they share is the one that matters:
+/// nothing returns until the answer is actually reachable, and everything
+/// that went up comes down again.
+enum Answering<'a> {
+    /// A path on the port 80 listener, answered by the traffic path.
+    Http01 {
+        listener: SocketAddr,
+        file: &'a str,
+        live: Vec<String>,
+    },
+    /// A TXT record at a name server.
+    Dns01 {
+        provider: &'a DnsProvider,
+        secret: String,
+        live: Vec<String>,
+    },
+}
+
+impl Answering<'_> {
+    /// Puts one publication in place and takes away what it replaced.
+    fn apply(&mut self, publication: &Publication) -> Result<(), Failure> {
+        // A publication of the other kind would be answered in the wrong
+        // place and would never be found. The order builds both, so this is
+        // what keeps one from reaching the other's publisher.
+        publication.meant_for(self.kind())?;
+
+        match self {
+            Self::Http01 {
+                listener,
+                file,
+                live,
+            } => {
+                // The traffic path answers one value per token, and the flow
+                // never gives it more than one.
+                let flat: BTreeMap<String, String> = publication
+                    .entries
+                    .iter()
+                    .filter_map(|(token, values)| {
+                        values.first().map(|value| (token.clone(), value.clone()))
+                    })
+                    .collect();
+                // Recorded before the file is written, so a publication that
+                // fails on the step after is still one the cleanup knows about.
+                let previous = std::mem::replace(live, flat.keys().cloned().collect());
+                write_challenges(file, &flat)?;
+                // Confirmed before this returns, because the very next thing
+                // the order does is tell the certificate authority to come and
+                // read it. A server that arrives first reads a 404 and marks
+                // the name invalid, and that failure is not one a retry fixes
+                // (ADR-0026).
+                reachable(*listener, &flat, &previous)
+            }
+            Self::Dns01 {
+                provider,
+                secret,
+                live,
+            } => {
+                // Recorded before the write, for the same reason: a provider
+                // that took the record and then failed the wait for it to
+                // appear is still holding it.
+                let previous =
+                    std::mem::replace(live, publication.entries.keys().cloned().collect());
+                let gone: Vec<String> = previous
+                    .into_iter()
+                    .filter(|name| !publication.entries.contains_key(name))
+                    .collect();
+
+                if !publication.entries.is_empty() {
+                    // This waits until a name server answers with the record,
+                    // for the same reason the listener is read back above.
+                    ek_ek_tls::dns::publish(provider, secret, &publication.entries, &mut |wait| {
+                        std::thread::sleep(wait)
+                    })?;
+                    say(&format!(
+                        r#"{{"kind":"acme","ts":{},"event":"published","records":{}}}"#,
+                        now(),
+                        list(&publication.entries.keys().cloned().collect::<Vec<String>>())
+                    ));
+                }
+
+                if !gone.is_empty() {
+                    ek_ek_tls::dns::withdraw(provider, secret, &gone)?;
+                    say(&format!(
+                        r#"{{"kind":"acme","ts":{},"event":"withdrawn","records":{}}}"#,
+                        now(),
+                        list(&gone)
+                    ));
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    const fn kind(&self) -> Challenge {
+        match self {
+            Self::Http01 { .. } => Challenge::Http01,
+            Self::Dns01 { .. } => Challenge::Dns01,
+        }
+    }
+}
+
+/// The provider a DNS-01 certificate names, and the credential it uses.
+///
+/// The credential comes out of the store, where it sits sealed with the
+/// node's master key (ADR-0018). The configuration carries only a reference
+/// to it, so an exported document leaks nothing.
+fn dns_provider<'a>(
+    config: &'a Config,
+    state: &Snapshot,
+    source: &CertificateSource,
+) -> Result<(&'a DnsProvider, String), Failure> {
+    let CertificateSource::AcmeDns01 { provider: wanted } = source else {
+        return Err(Failure::new(
+            Reason::Configuration,
+            "this certificate is not obtained with DNS-01".to_owned(),
+        ));
+    };
+
+    let provider = config
+        .dns_providers
+        .iter()
+        .find(|provider| &provider.id == wanted)
+        .ok_or_else(|| {
+            Failure::new(
+                Reason::Configuration,
+                format!("{} names no DNS provider", wanted.as_str()),
+            )
+        })?;
+
+    let id = match &provider.connection {
+        DnsProviderConnection::Rfc2136 { tsig_secret, .. } => tsig_secret,
+        DnsProviderConnection::Cloudflare { api_token, .. } => api_token,
+    };
+    let held = state.secrets.get(id).ok_or_else(|| {
+        Failure::new(
+            Reason::Configuration,
+            format!(
+                "the credential of {} is not in the store; put it there with `ek-ek secret set --id {}`",
+                provider.id.as_str(),
+                id.as_str()
+            ),
+        )
+    })?;
+
+    let credential = String::from_utf8(held.expose().to_vec()).map_err(|_| {
+        Failure::new(
+            Reason::Configuration,
+            format!("the credential of {} is not text", provider.id.as_str()),
+        )
+    })?;
+    Ok((provider, credential))
 }
 
 /// Reads the certificate back out of the store and checks it can be served.

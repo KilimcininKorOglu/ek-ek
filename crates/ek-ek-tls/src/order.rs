@@ -35,8 +35,76 @@ pub const MOST_POLLS: u32 = 60;
 /// not normal, and repeating forever would be a loop nothing breaks.
 pub const MOST_NONCE_RETRIES: u32 = 5;
 
-/// The challenge type this flow answers.
-const HTTP01: &str = "http-01";
+/// Which challenge a flow answers.
+///
+/// Carried rather than assumed, because what is published differs in kind and
+/// not only in value: one is a path a listener answers, the other a record a
+/// name server holds. The publisher reads this and refuses a publication it
+/// cannot serve, so the two can never be crossed (ADR-0078).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Challenge {
+    /// Answered at a path on port 80 by the product itself.
+    Http01,
+    /// Answered by a TXT record, which is what a wildcard needs.
+    Dns01,
+}
+
+impl Challenge {
+    /// The type an ACME server names this challenge with.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Http01 => "http-01",
+            Self::Dns01 => "dns-01",
+        }
+    }
+}
+
+/// What has to be reachable while the server checks.
+///
+/// One name can carry more than one value: a certificate covering both
+/// `example.org` and `*.example.org` gets two authorizations, and both are
+/// answered at `_acme-challenge.example.org` with different values. Both have
+/// to be there at once (RFC 8555 section 7.1.4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Publication {
+    /// Which challenge these entries answer.
+    pub kind: Option<Challenge>,
+    /// Token to answer for HTTP-01, record name to values for DNS-01.
+    pub entries: BTreeMap<String, Vec<String>>,
+}
+
+impl Publication {
+    /// Whether there is nothing to publish.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Refuses a publication meant for the other challenge.
+    ///
+    /// The two are put in different places: one on a listener, one in a zone.
+    /// A publication delivered to the wrong one is never found, and the only
+    /// sign of it would be a name the certificate authority refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reason::Protocol`] when the kinds do not match. A publication
+    /// that names no kind is empty and belongs to whoever is closing up.
+    pub fn meant_for(&self, kind: Challenge) -> Result<(), Failure> {
+        match self.kind {
+            Some(carried) if carried != kind => Err(Failure::new(
+                Reason::Protocol,
+                format!(
+                    "a {} answer cannot be published where a {} answer goes",
+                    carried.wire_name(),
+                    kind.wire_name()
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+}
 
 /// The problem type a server uses for a nonce it will not take.
 const BAD_NONCE: &str = "urn:ietf:params:acme:error:badNonce";
@@ -152,7 +220,8 @@ pub struct Flow {
     certificate: Option<String>,
     waiting: Vec<String>,
     challenge: Option<String>,
-    published: BTreeMap<String, String>,
+    kind: Challenge,
+    published: Publication,
     chain: Option<String>,
     polls: u32,
 }
@@ -170,6 +239,7 @@ impl Flow {
         thumbprint: impl Into<String>,
         contact: impl Into<String>,
         csr: impl Into<String>,
+        kind: Challenge,
     ) -> Self {
         Self {
             stage: Stage::Directory,
@@ -185,7 +255,8 @@ impl Flow {
             certificate: None,
             waiting: Vec::new(),
             challenge: None,
-            published: BTreeMap::new(),
+            kind,
+            published: Publication::default(),
             chain: None,
             polls: 0,
         }
@@ -249,8 +320,14 @@ impl Flow {
     /// order finishes, so the path is open only while the server is actually
     /// asking (ADR-0026).
     #[must_use]
-    pub fn published(&self) -> &BTreeMap<String, String> {
+    pub fn published(&self) -> &Publication {
         &self.published
+    }
+
+    /// Which challenge this order answers.
+    #[must_use]
+    pub const fn challenge(&self) -> Challenge {
+        self.kind
     }
 
     /// The account this order signs as, once the server has named one.
@@ -333,7 +410,7 @@ impl Flow {
                 }
                 self.chain = Some(answer.body.clone());
                 // The order is done, so nothing has to stay reachable.
-                self.published.clear();
+                self.published.entries.clear();
                 self.stage = Stage::Done;
                 Ok(Progress::Moved)
             }
@@ -346,7 +423,7 @@ impl Flow {
     /// Called by the carrier on every path out, so a failed attempt never
     /// leaves the path open for the next one to inherit.
     pub fn abandon(&mut self) {
-        self.published.clear();
+        self.published.entries.clear();
         self.stage = Stage::Done;
     }
 
@@ -453,25 +530,67 @@ impl Flow {
                     "the authorization names no challenges".to_owned(),
                 )
             })?;
+        let wanted = self.kind.wire_name();
         let challenge = challenges
             .iter()
-            .find(|challenge| challenge.get("type").and_then(Value::as_str) == Some(HTTP01))
+            .find(|challenge| challenge.get("type").and_then(Value::as_str) == Some(wanted))
             .ok_or_else(|| {
                 Failure::new(
                     Reason::Challenge,
-                    "the server offers no HTTP-01 challenge for this name".to_owned(),
+                    format!("the server offers no {wanted} challenge for this name"),
                 )
             })?;
 
         let token = text(challenge, "token")?;
-        if token.is_empty() || token.contains('/') {
+        if token.is_empty() {
             return Err(Failure::new(
                 Reason::Protocol,
-                "the server sent a token that cannot name a path".to_owned(),
+                "the server sent an empty challenge token".to_owned(),
             ));
         }
-        self.published
-            .insert(token.clone(), key_authorization(&token, &self.thumbprint));
+
+        match self.kind {
+            Challenge::Http01 => {
+                // The token becomes the last segment of a path here, and only
+                // here. A separator in it would name something else.
+                if token.contains('/') {
+                    return Err(Failure::new(
+                        Reason::Protocol,
+                        "the server sent a token that cannot name a path".to_owned(),
+                    ));
+                }
+                self.published.entries.insert(
+                    token.clone(),
+                    vec![key_authorization(&token, &self.thumbprint)],
+                );
+            }
+            Challenge::Dns01 => {
+                // The name the record sits at comes from the authorization,
+                // not from what was ordered: a wildcard is authorised under
+                // the name it stands for, and both land at the same record.
+                let identifier = document
+                    .get("identifier")
+                    .and_then(|identifier| identifier.get("value"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        Failure::new(
+                            Reason::Protocol,
+                            "the authorization names no identifier".to_owned(),
+                        )
+                    })?;
+                let record = crate::dns::challenge_name(identifier);
+                let value = crate::jws::record_value(&token, &self.thumbprint)?;
+                // Appended rather than replaced: an apex and its wildcard are
+                // two authorizations answered at one name, and dropping either
+                // value fails the other one.
+                self.published
+                    .entries
+                    .entry(record)
+                    .or_default()
+                    .push(value);
+            }
+        }
+        self.published.kind = Some(self.kind);
         self.challenge = Some(text(challenge, "url")?);
         self.stage = Stage::Accept;
         Ok(Progress::Moved)

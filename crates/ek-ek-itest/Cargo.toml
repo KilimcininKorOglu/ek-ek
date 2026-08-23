@@ -12,6 +12,10 @@ description = "Integration test harness for the three node docker cluster"
 # and observes it the way an operator would, so a change in a product crate can
 # never quietly change what the tests measure (ADR-0014).
 [dependencies]
+# For the stand-in API server's own TLS. Not a product crate, and nothing it
+# does here comes from one: the server is a listener with a certificate it
+# signs for itself, and the DNS write behind it goes through BIND's own client.
+openssl = { workspace = true }
 
 # Only the measurements use this, never the binaries that run inside a node.
 # A record written to stdout is read by parsing the line, which also measures
@@ -31,6 +35,13 @@ path = "src/bin/ek-ek-loadgen.rs"
 [[bin]]
 name = "ek-ek-standin-agent"
 path = "src/bin/ek-ek-standin-agent.rs"
+
+# Stands in for Cloudflare's API, which no measurement may reach. Applies every
+# accepted change to the lab's name server with BIND's own client, so what the
+# certificate authority looks up is a real record.
+[[bin]]
+name = "ek-ek-standin-cloudflare"
+path = "src/bin/ek-ek-standin-cloudflare.rs"
 
 [lints]
 workspace = true

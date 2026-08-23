@@ -11,13 +11,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ek_ek_config::AcmeSettings;
 use ek_ek_tls::{
-    ATTEMPTS, FIRST_WAIT, Failure, Reason, Reply, Transport, obtain_over, wait_before,
+    ATTEMPTS, Challenge, FIRST_WAIT, Failure, Publication, Reason, Reply, Transport, obtain_over,
+    wait_before,
 };
 
 const DIRECTORY: &str = "https://acme.example.org/dir";
@@ -176,7 +176,7 @@ fn issuing() -> Vec<Scripted> {
 }
 
 /// What the publisher was told, in order.
-type Published = Vec<BTreeMap<String, String>>;
+type Published = Vec<Publication>;
 
 /// Only the waits between attempts.
 ///
@@ -211,14 +211,18 @@ impl Run {
     }
 }
 
-fn run_with(mut transport: Fake, directory: &str) -> Run {
+fn run_with(transport: Fake, directory: &str) -> Run {
+    run_kind(transport, directory, Challenge::Http01)
+}
+
+fn run_kind(mut transport: Fake, directory: &str, kind: Challenge) -> Run {
     let key = ek_ek_tls::account_key().expect("an account key");
     let published: Mutex<Published> = Mutex::new(Vec::new());
     let waits: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
     let timeline = Arc::clone(&transport.timeline);
 
     let outcome = {
-        let mut publish = |challenges: &BTreeMap<String, String>| -> Result<(), Failure> {
+        let mut publish = |challenges: &Publication| -> Result<(), Failure> {
             timeline
                 .lock()
                 .expect("nothing else holds it")
@@ -240,6 +244,7 @@ fn run_with(mut transport: Fake, directory: &str) -> Run {
             &settings(directory),
             &key,
             &["www.example.org".to_owned()],
+            kind,
             &mut transport,
             &mut publish,
             &mut pause,
@@ -296,7 +301,9 @@ fn the_challenge_is_published_before_the_server_is_asked_to_check_it() {
         run.published
     );
     let published = run.published[0]
+        .entries
         .get(TOKEN)
+        .and_then(|values| values.first())
         .expect("the token the server sent is the one published");
     assert!(
         published.starts_with(&format!("{TOKEN}.")) && published.len() > TOKEN.len() + 1,
@@ -350,7 +357,7 @@ fn a_failed_order_still_closes_the_challenge_path() {
     assert_eq!(failure.reason(), Reason::Challenge);
 
     assert_eq!(run.published.len(), 2);
-    assert!(run.published[0].contains_key(TOKEN));
+    assert!(run.published[0].entries.contains_key(TOKEN));
     assert!(
         run.published[1].is_empty(),
         "a failed order left the path open for anybody to reach"
@@ -503,7 +510,7 @@ fn a_server_that_rejects_every_nonce_stops_rather_than_looping() {
 fn a_publisher_that_cannot_open_the_path_stops_the_order() {
     let key = ek_ek_tls::account_key().expect("an account key");
     let mut transport = Fake::new(issuing());
-    let mut publish = |challenges: &BTreeMap<String, String>| -> Result<(), Failure> {
+    let mut publish = |challenges: &Publication| -> Result<(), Failure> {
         if challenges.is_empty() {
             Ok(())
         } else {
@@ -519,6 +526,7 @@ fn a_publisher_that_cannot_open_the_path_stops_the_order() {
         &settings(DIRECTORY),
         &key,
         &["www.example.org".to_owned()],
+        Challenge::Http01,
         &mut transport,
         &mut publish,
         &mut pause,
@@ -566,12 +574,13 @@ fn nothing_secret_reaches_a_log_or_an_error() {
     // A run that goes all the way through, so the records cover the working
     // path as well as the failing one.
     let mut transport = Fake::new(issuing());
-    let mut publish = |_: &BTreeMap<String, String>| Ok(());
+    let mut publish = |_: &Publication| Ok(());
     let mut pause = |_: Duration| {};
     let good = obtain_over(
         &settings(DIRECTORY),
         &key,
         &["www.example.org".to_owned()],
+        Challenge::Http01,
         &mut transport,
         &mut publish,
         &mut pause,
@@ -583,6 +592,7 @@ fn nothing_secret_reaches_a_log_or_an_error() {
         &settings(DIRECTORY),
         &key,
         &["www.example.org".to_owned()],
+        Challenge::Http01,
         &mut transport,
         &mut publish,
         &mut pause,
@@ -613,5 +623,47 @@ fn nothing_secret_reaches_a_log_or_an_error() {
     assert!(
         !written.contains(&thumbprint),
         "the account key's fingerprint reached a log"
+    );
+}
+
+#[test]
+fn a_publication_that_failed_halfway_is_still_taken_away() {
+    let key = ek_ek_tls::account_key().expect("an account key");
+    let mut transport = Fake::new(issuing());
+    let seen: Mutex<Published> = Mutex::new(Vec::new());
+    let outcome = {
+        // A publisher that put the answer somewhere and then failed on the
+        // step after, which is what a record written to a zone that has not
+        // caught up looks like.
+        let mut publish = |challenges: &Publication| -> Result<(), Failure> {
+            seen.lock()
+                .expect("nothing else holds it")
+                .push(challenges.clone());
+            if challenges.is_empty() {
+                Ok(())
+            } else {
+                Err(Failure::new(
+                    Reason::Challenge,
+                    "the answer was written and never became reachable".to_owned(),
+                ))
+            }
+        };
+        let mut pause = |_: Duration| {};
+        obtain_over(
+            &settings(DIRECTORY),
+            &key,
+            &["www.example.org".to_owned()],
+            Challenge::Http01,
+            &mut transport,
+            &mut publish,
+            &mut pause,
+        )
+    };
+
+    assert!(outcome.is_err());
+    let seen = seen.into_inner().expect("nothing else holds it");
+    assert!(
+        seen.iter().any(|publication| publication.is_empty()),
+        "the publisher was never told to take away what it had already put in place: {seen:?}"
     );
 }

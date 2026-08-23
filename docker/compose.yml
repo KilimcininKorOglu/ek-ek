@@ -37,6 +37,13 @@ services:
     <<: *node
     container_name: ek-ek-node1
     hostname: node1
+    # The lab's own name server. A node resolves the way it would in a network
+    # with an internal zone, which is what makes the DNS-01 measurement real:
+    # the record the product writes is the record it then looks up.
+    dns:
+      - 172.28.0.42
+    depends_on:
+      - bind
     volumes:
       - ../docker-data/node1:/var/lib/ek-ek
     networks:
@@ -53,6 +60,10 @@ services:
     <<: *node
     container_name: ek-ek-node2
     hostname: node2
+    dns:
+      - 172.28.0.42
+    depends_on:
+      - bind
     volumes:
       - ../docker-data/node2:/var/lib/ek-ek
     networks:
@@ -63,6 +74,10 @@ services:
     <<: *node
     container_name: ek-ek-node3
     hostname: node3
+    dns:
+      - 172.28.0.42
+    depends_on:
+      - bind
     volumes:
       - ../docker-data/node3:/var/lib/ek-ek
     networks:
@@ -158,10 +173,21 @@ services:
     hostname: pebble
     restart: "no"
     init: true
+    depends_on:
+      - bind
     environment:
       # Validation runs immediately instead of after a random pause, so a
       # measurement waits on the product rather than on the test server.
       PEBBLE_VA_NOSLEEP: "1"
+    # The lab's name server, not Docker's. A DNS-01 challenge is checked by
+    # looking a record up, and the record this product writes lives in the
+    # zone below. The zone also carries node1, so the HTTP-01 measurement
+    # still finds the name it validates against.
+    command:
+      - -config
+      - /test/config/pebble-config.json
+      - -dnsserver
+      - 172.28.0.42:53
     volumes:
       # Only to move the challenge check onto port 80. The shipped file uses
       # 5002, and the product listens where a real authority asks.
@@ -169,6 +195,34 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.41
+
+  # The lab's name server, for measuring that the dynamic updates this product
+  # writes are ones a real BIND accepts (T-028). It is authoritative for the
+  # lab zone and forwards everything else, so a node pointed at it still finds
+  # the other containers by name.
+  #
+  # The shared key is generated on every start and written to a bind mount for
+  # whoever configures the client side. Nothing about it is tracked: a key in
+  # the repository is a key published from the first commit.
+  bind:
+    build:
+      context: .
+      dockerfile: Dockerfile.bind
+    image: ek-ek-bind:latest
+    container_name: ek-ek-bind
+    hostname: bind
+    restart: "no"
+    init: true
+    environment:
+      LAB_ZONE: ek-ek.test
+      LAB_TSIG_KEY: ek-ek-update
+      LAB_NODE1: 172.28.0.11
+      LAB_SELF: 172.28.0.42
+    volumes:
+      - ../docker-data/bind:/shared
+    networks:
+      lab:
+        ipv4_address: 172.28.0.42
 
 networks:
   lab:

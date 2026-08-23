@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod acme;
+mod secret;
 
 #[derive(Parser)]
 #[command(
@@ -39,6 +40,36 @@ enum Command {
 
     /// Obtain one certificate from the configured ACME server and store it
     Acme(AcmeArgs),
+
+    /// Work with the credentials the configuration refers to
+    #[command(subcommand)]
+    Secret(SecretCommand),
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// Store one credential, such as a DNS provider's shared key
+    Set(SecretSetArgs),
+}
+
+#[derive(Args)]
+struct SecretSetArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// Identity the configuration refers to this credential by
+    #[arg(long)]
+    id: String,
+
+    /// File holding the value. Never passed as an argument, because arguments
+    /// are visible to every user on the machine
+    #[arg(long)]
+    from_file: String,
+
+    /// Configuration document to start an empty store from
+    #[arg(long)]
+    config: Option<String>,
 }
 
 #[derive(Args)]
@@ -94,6 +125,14 @@ fn main() -> ExitCode {
                 data_dir: &args.data_dir,
                 certificate: &args.certificate,
                 challenges: &args.challenges,
+            });
+        }
+        Command::Secret(SecretCommand::Set(args)) => {
+            return secret::set(&secret::Arguments {
+                data_dir: &args.data_dir,
+                id: &args.id,
+                from_file: &args.from_file,
+                config: args.config.as_deref(),
             });
         }
     }

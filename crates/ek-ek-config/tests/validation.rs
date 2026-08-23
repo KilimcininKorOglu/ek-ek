@@ -757,3 +757,93 @@ fn a_frontend_that_never_names_an_access_log_writes_every_request() {
         );
     }
 }
+
+#[test]
+fn a_dns_provider_given_no_time_to_publish_is_refused() {
+    let mut config = sample();
+    config.dns_providers[0].propagation_timeout_secs = 0;
+
+    let found = faults(&config);
+
+    assert_eq!(
+        found.codes(),
+        vec![ErrorCode::DnsProviderPropagationTimeoutZero],
+        "no wait at all means the authority is told to look before anything can have arrived"
+    );
+    assert_eq!(
+        found.as_slice()[0].path.as_text(),
+        "dns_providers[0].propagation_timeout_secs"
+    );
+
+    // One second is short, and it is still a wait somebody chose.
+    config.dns_providers[0].propagation_timeout_secs = 1;
+    validate(&config).expect("a short wait is a wait");
+}
+
+#[test]
+fn a_dns_provider_reached_over_plain_http_is_refused() {
+    let mut config = sample();
+    let ek_ek_config::DnsProviderConnection::Cloudflare { api_base, .. } =
+        &mut config.dns_providers[1].connection
+    else {
+        panic!("the second provider is the API one");
+    };
+    *api_base = "http://api.example.org/client/v4".to_owned();
+
+    let found = faults(&config);
+
+    assert_eq!(
+        found.codes(),
+        vec![ErrorCode::DnsProviderApiBaseInvalid],
+        "a bearer token sent in the clear is a token anybody on the path now holds"
+    );
+    assert_eq!(
+        found.as_slice()[0].path.as_text(),
+        "dns_providers[1].connection.api_base"
+    );
+}
+
+#[test]
+fn an_api_address_over_tls_and_an_empty_one_are_both_accepted() {
+    let mut config = sample();
+    let ek_ek_config::DnsProviderConnection::Cloudflare { api_base, .. } =
+        &mut config.dns_providers[1].connection
+    else {
+        panic!("the second provider is the API one");
+    };
+    *api_base = "https://api.example.org/client/v4".to_owned();
+    validate(&config).expect("an address over TLS is what the rule asks for");
+
+    let ek_ek_config::DnsProviderConnection::Cloudflare { api_base, .. } =
+        &mut config.dns_providers[1].connection
+    else {
+        panic!("the second provider is the API one");
+    };
+    api_base.clear();
+    validate(&config).expect("empty means the real API, which is the ordinary case");
+}
+
+#[test]
+fn a_dns_provider_survives_a_write_and_a_read() {
+    let config = sample();
+    let written = serde_json::to_string(&config).expect("a configuration writes out");
+    let read: ek_ek_config::Config = serde_json::from_str(&written).expect("and reads back");
+    assert_eq!(read.dns_providers, config.dns_providers);
+
+    // A document written before these fields existed still reads, because an
+    // upgrade is rolling and a node will meet one (ADR-0019).
+    let older = written
+        .replace(
+            &format!(
+                r#","propagation_timeout_secs":{}"#,
+                config.dns_providers[0].propagation_timeout_secs
+            ),
+            "",
+        )
+        .replace(",\"api_base\":\"\"", "");
+    let read: ek_ek_config::Config = serde_json::from_str(&older).expect("an older document reads");
+    assert_eq!(
+        read.dns_providers[0].propagation_timeout_secs,
+        ek_ek_config::default_propagation_timeout_secs()
+    );
+}

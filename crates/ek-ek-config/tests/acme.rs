@@ -279,3 +279,44 @@ fn the_acme_block_survives_a_write_and_a_read() {
     let read: Config = serde_json::from_str(&without).expect("an older document reads");
     assert_eq!(read.acme, None);
 }
+
+#[test]
+fn a_wildcard_ordered_with_http_validation_is_told_it_needs_dns() {
+    let mut config = ordering();
+    config.certificates[0].sni_names = vec!["*.example.org".to_owned()];
+
+    assert!(
+        codes(&config).contains(&WarningCode::AcmeWildcardNeedsDns01),
+        "a wildcard is never issued against an HTTP-01 authorization, so this order can only fail"
+    );
+}
+
+#[test]
+fn a_wildcard_ordered_with_dns_validation_is_left_alone() {
+    let mut config = ordering();
+    config.certificates[0].sni_names = vec!["*.example.org".to_owned()];
+    config.certificates[0].source = CertificateSource::AcmeDns01 {
+        provider: ek_ek_config::DnsProviderId::new("dns-internal"),
+    };
+    config.dns_providers = common::sample().dns_providers;
+
+    assert!(
+        !codes(&config).contains(&WarningCode::AcmeWildcardNeedsDns01),
+        "this is exactly what DNS-01 is for"
+    );
+}
+
+#[test]
+fn a_name_with_a_star_further_along_is_not_a_wildcard() {
+    let mut config = ordering();
+    // Not a wildcard and not a name either, but it is not this rule's job to
+    // say so: matching it here would report the wrong cause.
+    config.certificates[0].sni_names = vec!["www.*.example.org".to_owned()];
+
+    assert!(!codes(&config).contains(&WarningCode::AcmeWildcardNeedsDns01));
+}
+
+#[test]
+fn an_ordinary_name_is_never_called_a_wildcard() {
+    assert!(!codes(&ordering()).contains(&WarningCode::AcmeWildcardNeedsDns01));
+}

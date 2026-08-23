@@ -15,7 +15,6 @@
 //! attempts, without a network and without waiting fifteen minutes. Production
 //! passes an HTTPS transport and `std::thread::sleep`.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ek_ek_config::AcmeSettings;
@@ -25,7 +24,7 @@ use crate::attempt::{ATTEMPTS, wait_before};
 use crate::csr;
 use crate::error::{Failure, Reason};
 use crate::jws::sign;
-use crate::order::{Answer, Ask, Flow, MOST_NONCE_RETRIES, Progress};
+use crate::order::{Answer, Ask, Challenge, Flow, MOST_NONCE_RETRIES, Progress, Publication};
 
 /// How long to wait between two reads of an order the server is still
 /// deciding on.
@@ -78,7 +77,7 @@ impl std::fmt::Debug for Obtained {
 ///
 /// Called with an empty map when the order ends, whether it succeeded or not,
 /// so the path never stays open past the order it was opened for.
-pub type Publish<'a> = &'a mut dyn FnMut(&BTreeMap<String, String>) -> Result<(), Failure>;
+pub type Publish<'a> = &'a mut dyn FnMut(&Publication) -> Result<(), Failure>;
 
 /// Waits, for as long as it is told to.
 pub type Pause<'a> = &'a mut dyn FnMut(Duration);
@@ -97,11 +96,20 @@ pub fn obtain(
     settings: &AcmeSettings,
     account: &PKey<Private>,
     names: &[String],
+    kind: Challenge,
     publish: Publish<'_>,
     pause: Pause<'_>,
 ) -> Result<Obtained, Failure> {
     let mut transport = https(settings)?;
-    obtain_over(settings, account, names, &mut transport, publish, pause)
+    obtain_over(
+        settings,
+        account,
+        names,
+        kind,
+        &mut transport,
+        publish,
+        pause,
+    )
 }
 
 /// Obtains a certificate over a transport somebody else built.
@@ -113,6 +121,7 @@ pub fn obtain_over(
     settings: &AcmeSettings,
     account: &PKey<Private>,
     names: &[String],
+    kind: Challenge,
     transport: &mut dyn Transport,
     publish: Publish<'_>,
     pause: Pause<'_>,
@@ -142,6 +151,7 @@ pub fn obtain_over(
             &thumbprint,
             &settings.contact_email,
             request.encoded(),
+            kind,
         );
 
         match run(&mut flow, account, transport, &mut *publish, &mut *pause) {
@@ -195,7 +205,7 @@ pub fn run(
     pause: Pause<'_>,
 ) -> Result<String, Failure> {
     let mut nonce: Option<String> = None;
-    let mut live: BTreeMap<String, String> = BTreeMap::new();
+    let mut live = Publication::default();
     let outcome = drive(
         flow,
         account,
@@ -212,7 +222,13 @@ pub fn run(
     let closed = if live.is_empty() {
         Ok(())
     } else {
-        publish(&BTreeMap::new())
+        // The kind is kept, because taking a publication away means reaching
+        // the same place it was put: a name server for one, a listener for
+        // the other.
+        publish(&Publication {
+            kind: live.kind,
+            entries: std::collections::BTreeMap::new(),
+        })
     };
 
     match (outcome, closed) {
@@ -236,7 +252,7 @@ fn drive(
     publish: Publish<'_>,
     pause: Pause<'_>,
     nonce: &mut Option<String>,
-    live: &mut BTreeMap<String, String>,
+    live: &mut Publication,
 ) -> Result<String, Failure> {
     let mut rejected = 0_u32;
 
@@ -244,8 +260,12 @@ fn drive(
         // Published before the ask goes out, because the ask that follows a
         // new token is the one telling the server to come and read it.
         if flow.published() != &*live {
-            publish(flow.published())?;
+            // Recorded before the attempt rather than after it. A publisher
+            // that put the answer in place and then failed on the step after
+            // has still left something behind, and a cleanup that only knows
+            // about publications that succeeded would walk past it.
             live.clone_from(flow.published());
+            publish(&*live)?;
         }
 
         if flow.waiting_on_server() {

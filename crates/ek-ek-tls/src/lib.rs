@@ -40,6 +40,7 @@
 pub mod acme;
 pub mod attempt;
 pub mod csr;
+pub mod dns;
 pub mod error;
 pub mod inspect;
 pub mod jws;
@@ -49,11 +50,14 @@ pub mod record;
 pub use acme::{Obtained, POLL_INTERVAL, Reply, Transport, obtain, obtain_over, run};
 pub use attempt::{ATTEMPTS, FIRST_WAIT, wait_before, whole_run};
 pub use csr::{Request, request};
+pub use dns::{CHALLENGE_LABEL, challenge_name};
 pub use error::{Failure, Reason};
 pub use inspect::{MOST_CERTIFICATES, Upload, inspect};
 pub use jws::{
     Account, Identify, account_from_pem, account_key, account_to_pem, base64url, jwk,
-    key_authorization, sign, thumbprint,
+    key_authorization, record_value, sign, thumbprint,
 };
-pub use order::{Answer, Ask, Flow, MOST_NONCE_RETRIES, MOST_POLLS, Progress};
+pub use order::{
+    Answer, Ask, Challenge, Flow, MOST_NONCE_RETRIES, MOST_POLLS, Progress, Publication,
+};
 pub use record::{CHAIN_SUFFIX, KEY_SUFFIX, chain_id, install, key_id, remove};

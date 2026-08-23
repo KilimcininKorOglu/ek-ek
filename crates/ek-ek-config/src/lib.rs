@@ -52,8 +52,8 @@ pub use backend::{
     SessionStickiness,
 };
 pub use certificate::{
-    Certificate, CertificateSource, CertificateValidity, DnsProvider, DnsProviderConnection,
-    TsigAlgorithm,
+    CLOUDFLARE_API_BASE, Certificate, CertificateSource, CertificateValidity, DnsProvider,
+    DnsProviderConnection, TsigAlgorithm, default_propagation_timeout_secs,
 };
 pub use config::{Config, SchemaVersion};
 pub use frontend::{

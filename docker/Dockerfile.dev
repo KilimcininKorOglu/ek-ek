@@ -9,10 +9,13 @@ FROM debian:bookworm-slim
 # python3       -> open a raw socket on IP protocol 112, what VRRP actually uses
 # util-linux    -> setpriv, to drop to the host user while keeping capabilities
 # iputils-ping  -> node to node reachability
+# dnsutils      -> dig, to read a zone the way something outside the product
+#                  reads it, and nsupdate, which is BIND's own update client
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        dnsutils \
         iproute2 \
         iputils-ping \
         procps \

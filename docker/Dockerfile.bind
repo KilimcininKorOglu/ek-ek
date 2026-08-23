@@ -1,0 +1,11 @@
+# The lab's name server.
+#
+# A real BIND, because RFC 2136 and TSIG are what this product has to speak to
+# a name server nobody here wrote. A stand-in that accepts whatever we send
+# would measure nothing.
+FROM ubuntu/bind9:latest
+
+COPY bind/entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -93,6 +93,9 @@ BACKENDS := backend1 backend2
 # The builder writes here as the host user, so the directories must exist
 # and be owned by that user before the container mounts them.
 BUILDER_DIRS := builder-cargo builder-target
+# The name server writes its freshly generated shared key here, for whoever
+# configures the client side of a dynamic update.
+SHARED_DIRS := bind
 
 .PHONY: dev-env
 dev-env: ## Create .env and the docker-data directories if they are missing
@@ -103,7 +106,7 @@ dev-env: ## Create .env and the docker-data directories if they are missing
 		echo "created .env from .env.example"; \
 		echo "set EK_EK_ADMIN_PASSWORD in .env before bootstrapping a cluster"; \
 	fi
-	@mkdir -p $(addprefix $(DATA)/,$(NODES) $(BACKENDS) $(BUILDER_DIRS))
+	@mkdir -p $(addprefix $(DATA)/,$(NODES) $(BACKENDS) $(BUILDER_DIRS) $(SHARED_DIRS))
 	@for b in $(BACKENDS); do \
 		if [ ! -f $(DATA)/$$b/index.html ]; then \
 			echo "$$b" > $(DATA)/$$b/index.html; \
@@ -133,7 +136,7 @@ dev-verify: dev-env ## Prove the preconditions the product depends on
 .PHONY: dev-reset
 dev-reset: ## Delete docker-data and rebuild the cluster from scratch
 	@echo "This deletes the development cluster and everything under $(DATA)/:"
-	@for d in $(NODES) $(BACKENDS) $(BUILDER_DIRS); do \
+	@for d in $(NODES) $(BACKENDS) $(BUILDER_DIRS) $(SHARED_DIRS); do \
 		printf '  %s (%s)\n' "$(DATA)/$$d" "$$(du -sh $(DATA)/$$d 2>/dev/null | cut -f1 || echo missing)"; \
 	done
 	@read -r -p "Type 'sil' to confirm: " answer; \
