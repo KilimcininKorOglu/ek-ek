@@ -70,6 +70,12 @@ enum ClusterCommand {
     /// Answer peers on the peer port
     Serve(ClusterServeArgs),
 
+    /// Run this node's consensus member until it is told to stop
+    Node(ClusterNodeArgs),
+
+    /// Print what this node holds, without asking anybody
+    Status(ClusterStatusArgs),
+
     /// Ask one peer whether it is there
     Ping(ClusterPingArgs),
 }
@@ -118,6 +124,41 @@ struct ClusterEnrollArgs {
     /// Sign again even when the certificate on disk is not due yet
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Args)]
+struct ClusterNodeArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
+
+    /// Identity of this node
+    #[arg(long)]
+    node: String,
+
+    /// Directory holding the certificate, the key and the authority
+    #[arg(long)]
+    material: String,
+
+    /// Address to listen for peers on
+    #[arg(long, default_value_t = format!("0.0.0.0:{}", ek_ek_peer::DEFAULT_PORT))]
+    listen: String,
+
+    /// Bring the cluster into being with these members, as
+    /// `name=address,name=address`. Run on one node, once
+    #[arg(long)]
+    initialise: Option<String>,
+
+    /// Configuration file to watch and put through consensus when it changes
+    #[arg(long)]
+    apply: Option<String>,
+}
+
+#[derive(Args)]
+struct ClusterStatusArgs {
+    /// Directory the configuration store lives in
+    #[arg(long, default_value = ek_ek_store::DEFAULT_DATA_DIRECTORY)]
+    data_dir: String,
 }
 
 #[derive(Args)]
@@ -308,6 +349,21 @@ fn main() -> ExitCode {
                 node: &args.node,
                 material: &args.material,
                 connections: args.connections,
+            });
+        }
+        Command::Cluster(ClusterCommand::Node(args)) => {
+            return cluster::node(&cluster::NodeArguments {
+                data_dir: &args.data_dir,
+                node: &args.node,
+                material: &args.material,
+                listen: &args.listen,
+                initialise: args.initialise.as_deref(),
+                apply: args.apply.as_deref(),
+            });
+        }
+        Command::Cluster(ClusterCommand::Status(args)) => {
+            return cluster::status(&cluster::StatusArguments {
+                data_dir: &args.data_dir,
             });
         }
         Command::Cluster(ClusterCommand::Ping(args)) => {

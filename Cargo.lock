@@ -795,6 +795,7 @@ dependencies = [
  "ek-ek-ipc",
  "ek-ek-log",
  "ek-ek-peer",
+ "ek-ek-raft",
  "ek-ek-store",
  "ek-ek-tls",
  "h2",

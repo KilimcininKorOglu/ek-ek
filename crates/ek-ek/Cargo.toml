@@ -26,6 +26,10 @@ ek-ek-ipc = { workspace = true }
 # `cluster` creates the authority every node's peer certificate comes from and
 # opens the channel those certificates authenticate.
 ek-ek-peer = { workspace = true }
+# `cluster node` is the process that carries consensus. Nothing else in this
+# binary links it, and the traffic path is a separate process that must never
+# wait on a quorum (ADR-0004, ADR-0085).
+ek-ek-raft = { workspace = true }
 ek-ek-store = { workspace = true }
 ek-ek-tls = { workspace = true }
 # `acme` reads its own listener back before telling the certificate authority

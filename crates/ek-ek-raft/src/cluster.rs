@@ -361,23 +361,8 @@ impl Cluster {
         now_unix: i64,
         audit: &[AuditRecord],
     ) -> Result<VersionId, Failure> {
-        // A heartbeat round to a quorum, which fails rather than waits. Asked
-        // first so that a node with no quorum proposes nothing at all.
-        if let Err(error) = self.raft.get_read_log_id().await {
-            return Err(match error {
-                RaftError::APIError(CheckIsLeaderError::ForwardToLeader(elsewhere)) => {
-                    self.elsewhere(&elsewhere)
-                }
-                RaftError::APIError(CheckIsLeaderError::QuorumNotEnough(short)) => Failure::new(
-                    Reason::NoQuorum,
-                    format!("no quorum can be reached, so nothing was written: {short}"),
-                ),
-                RaftError::Fatal(fatal) => Failure::new(
-                    Reason::Consensus,
-                    format!("consensus has stopped, so nothing was written: {fatal}"),
-                ),
-            });
-        }
+        // Asked first so that a node with no quorum proposes nothing at all.
+        self.reachable().await?;
 
         let request = WriteRequest {
             state: WireSnapshot::from(state),
@@ -415,6 +400,45 @@ impl Cluster {
         }
     }
 
+    /// Whether this node can reach a quorum at this moment.
+    ///
+    /// A question about the cluster, not a read of the configuration. Nothing
+    /// on the read path asks it, because a configuration lookup that needed a
+    /// quorum would make every one of them depend on one (ADR-0004).
+    ///
+    /// What asks it is a write, before it proposes anything, and a status
+    /// screen. A screen needs it because [`Self::leader`] answers from this
+    /// node's own metrics: a leader that lost contact keeps naming itself
+    /// until it stands down, so "who leads?" answers even when nobody does
+    /// (ADR-0085).
+    ///
+    /// The question costs a heartbeat round to a quorum, and it fails rather
+    /// than waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reason::NotLeader`] when another node leads, naming it,
+    /// [`Reason::NoQuorum`] when no quorum can be reached, and
+    /// [`Reason::Consensus`] when consensus has stopped.
+    pub async fn reachable(&self) -> Result<(), Failure> {
+        match self.raft.get_read_log_id().await {
+            Ok(_) => Ok(()),
+            Err(RaftError::APIError(CheckIsLeaderError::ForwardToLeader(elsewhere))) => {
+                Err(self.elsewhere(&elsewhere))
+            }
+            Err(RaftError::APIError(CheckIsLeaderError::QuorumNotEnough(short))) => {
+                Err(Failure::new(
+                    Reason::NoQuorum,
+                    format!("no quorum can be reached: {short}"),
+                ))
+            }
+            Err(RaftError::Fatal(fatal)) => Err(Failure::new(
+                Reason::Consensus,
+                format!("consensus has stopped: {fatal}"),
+            )),
+        }
+    }
+
     /// Reads what this node holds.
     ///
     /// Local on purpose: this keeps working while quorum is lost (ADR-0004).
@@ -442,6 +466,12 @@ impl Cluster {
     /// Named, not numbered. The number comes back from consensus and the
     /// membership is what turns it back into the name an operator gave the
     /// node ([`crate::identity`]).
+    ///
+    /// A belief, and it can be out of date. A leader that lost contact with
+    /// its quorum keeps naming itself here until it stands down, so a screen
+    /// that showed only this would show a healthy cluster while nothing can be
+    /// written. [`Self::reachable`] is what asks whether the cluster is
+    /// actually there (ADR-0085).
     #[must_use]
     pub fn leader(&self) -> Option<NodeId> {
         let metrics = self.raft.metrics();
@@ -529,7 +559,7 @@ impl Cluster {
             None => Failure::new(
                 Reason::NoQuorum,
                 format!(
-                    "{} is not the leader and no leader is known, so nothing was written",
+                    "{} is not the leader and no leader is known",
                     self.node.as_str()
                 ),
             ),

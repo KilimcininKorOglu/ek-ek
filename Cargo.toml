@@ -93,7 +93,7 @@ http = "1"
 # answers. Pinned to the version pingora already builds, so it costs no extra
 # compilation.
 h2 = "0.4"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 # Layer boundaries are enforced by the dependency direction between crates.
 # ek-ek-config depends on no workspace crate.

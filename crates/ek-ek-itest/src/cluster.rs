@@ -10,6 +10,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// Addresses reserved for VIP tests. Nothing in the compose file may take one.
 pub const VIP_RANGE: (u8, u8) = (100, 110);
@@ -99,6 +100,33 @@ impl Cluster {
     pub fn stop(mut self) -> Result<()> {
         self.dump_logs_on_panic = false;
         compose_ok(&["down", "--remove-orphans"])
+    }
+
+    /// Stops one node's container, and with it everything running inside.
+    ///
+    /// This is what "a node went away" means: not a process that was killed,
+    /// but a machine that is no longer there. A measurement of what the rest
+    /// of the cluster does without it has to be able to say that much.
+    pub fn stop_node(&self, name: &str) -> Result<()> {
+        self.node(name)?;
+        compose_ok(&["stop", "-t", "3", name])
+    }
+
+    /// Starts a node's container again and waits until it answers.
+    ///
+    /// The store is on a bind mount, so what comes back is the node that left
+    /// rather than a new one.
+    pub fn start_node(&self, name: &str) -> Result<()> {
+        let node = self.node(name)?;
+        compose_ok(&["start", name])?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if node.run(&["true"]).is_ok_and(|answered| answered.ok()) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Err(Error::new(format!("{name} did not come back")))
     }
 
     /// True when every service in the compose project is running.
