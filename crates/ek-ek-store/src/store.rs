@@ -88,4 +88,17 @@ pub trait Store {
     /// Fails when the state cannot be written. A failed write leaves the
     /// previous state intact.
     fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId>;
+
+    /// Replaces the stored state, recording the version at the moment given.
+    ///
+    /// The moment is a parameter because a replicated write must land on the
+    /// same second on every node. The leader decides it once and it travels in
+    /// the log entry; a node reading its own clock would produce a version
+    /// history that drifts between nodes (ADR-0083).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state cannot be written. A failed write leaves the
+    /// previous state intact.
+    fn write_at(&self, snapshot: &Snapshot, change: &Change, now_unix: i64) -> Result<VersionId>;
 }

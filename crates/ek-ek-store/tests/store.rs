@@ -290,7 +290,11 @@ impl Store for MemoryStore {
         }
     }
 
-    fn write(&self, snapshot: &Snapshot, _change: &Change) -> Result<VersionId> {
+    fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId> {
+        self.write_at(snapshot, change, 0)
+    }
+
+    fn write_at(&self, snapshot: &Snapshot, _change: &Change, _now_unix: i64) -> Result<VersionId> {
         match self.state.lock() {
             Ok(mut state) => {
                 state.push(snapshot.clone());

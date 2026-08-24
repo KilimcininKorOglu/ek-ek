@@ -19,6 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use crate::cluster::ClusterIdentity;
 use crate::crypto::{Sealed, open, seal};
 use crate::error::{Error, ErrorKind, Result};
+use crate::journal::{AuditRecord, FullState, Journal, Record, StoredVersion};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
 use crate::migration::{MIGRATIONS, Migration, migrate_document, target_version};
 use crate::secret::Secret;
@@ -381,16 +382,43 @@ impl Store for SqliteStore {
     }
 
     fn write(&self, snapshot: &Snapshot, change: &Change) -> Result<VersionId> {
-        self.write_version(snapshot, change, None)
+        self.write_at(snapshot, change, seconds_since_epoch()?)
+    }
+
+    fn write_at(&self, snapshot: &Snapshot, change: &Change, now_unix: i64) -> Result<VersionId> {
+        self.write_version(snapshot, change, None, now_unix, &[])
     }
 }
 
 impl SqliteStore {
+    /// Applies one replicated write and records where the log has been
+    /// applied to, in one transaction.
+    ///
+    /// The two have to move together. A node that stops between them either
+    /// applies the same record twice or never applies it, and nothing on disk
+    /// would say which (ADR-0083).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state cannot be written. A failed apply leaves the
+    /// previous state and the previous marker intact.
+    pub fn apply_write(
+        &self,
+        snapshot: &Snapshot,
+        change: &Change,
+        now_unix: i64,
+        markers: &[(&str, &str)],
+    ) -> Result<VersionId> {
+        self.write_version(snapshot, change, None, now_unix, markers)
+    }
+
     fn write_version(
         &self,
         snapshot: &Snapshot,
         change: &Change,
         restored: Option<VersionId>,
+        now: i64,
+        markers: &[(&str, &str)],
     ) -> Result<VersionId> {
         let document = serde_json::to_string(&snapshot.config).map_err(|error| {
             Error::new(
@@ -398,7 +426,6 @@ impl SqliteStore {
                 format!("the config could not be written out: {error}"),
             )
         })?;
-        let now = seconds_since_epoch()?;
 
         // Seal outside the transaction, so the database is held for as short
         // a time as possible and a sealing failure never leaves a half
@@ -465,6 +492,16 @@ impl SqliteStore {
 
         let version = append_version(&transaction, &document, snapshot, change, restored, now)?;
         prune(&transaction, change, now)?;
+
+        for (name, value) in markers {
+            transaction
+                .execute(
+                    "INSERT INTO raft_marker (name, value) VALUES (?1, ?2) \
+                     ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![name, value],
+                )
+                .map_err(storage("a marker could not be written beside the state"))?;
+        }
 
         transaction
             .commit()
@@ -580,7 +617,7 @@ impl History for SqliteStore {
             secrets: current.secrets,
             cluster: current.cluster,
         };
-        self.write_version(&snapshot, change, Some(id))
+        self.write_version(&snapshot, change, Some(id), seconds_since_epoch()?, &[])
     }
 
     fn prunings(&self) -> Result<Vec<PruningRecord>> {
@@ -797,6 +834,364 @@ fn seconds_since_epoch() -> Result<i64> {
     })
 }
 
+impl SqliteStore {
+    /// Reads everything a peer would need to become identical to this node.
+    ///
+    /// Key material comes back in the clear. What travels is protected by the
+    /// channel it crosses; what rests is sealed by whichever node stores it,
+    /// with its own master key (ADR-0018).
+    ///
+    /// # Errors
+    ///
+    /// Fails when any part of the state cannot be read.
+    pub fn export(&self) -> Result<FullState> {
+        let snapshot = self.read()?;
+
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, recorded_at, author, description, schema_version, restored_from, document \
+                 FROM config_version ORDER BY id",
+            )
+            .map_err(storage("the version export could not be prepared"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(StoredVersion {
+                    id: VersionId::new(row.get(0)?),
+                    recorded_at_unix: row.get(1)?,
+                    author: row.get(2)?,
+                    description: row.get(3)?,
+                    schema_version: {
+                        let value: i64 = row.get(4)?;
+                        u32::try_from(value)
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, value))?
+                    },
+                    restored_from: row.get::<_, Option<i64>>(5)?.map(VersionId::new),
+                    document: row.get(6)?,
+                })
+            })
+            .map_err(storage("the version log could not be exported"))?;
+        let mut versions = Vec::new();
+        for row in rows {
+            versions.push(row.map_err(storage("a version could not be exported"))?);
+        }
+        drop(statement);
+
+        let mut statement = connection
+            .prepare(
+                "SELECT recorded_at, actor, action, subject, detail FROM audit_log ORDER BY id",
+            )
+            .map_err(storage("the audit export could not be prepared"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(AuditRecord {
+                    recorded_at_unix: row.get(0)?,
+                    actor: row.get(1)?,
+                    action: row.get(2)?,
+                    subject: row.get(3)?,
+                    detail: row.get(4)?,
+                })
+            })
+            .map_err(storage("the audit log could not be exported"))?;
+        let mut audit = Vec::new();
+        for row in rows {
+            audit.push(row.map_err(storage("an audit record could not be exported"))?);
+        }
+
+        Ok(FullState {
+            snapshot,
+            versions,
+            audit,
+        })
+    }
+
+    /// Replaces everything this node holds with the state given.
+    ///
+    /// One transaction. A node catching up must never be left holding half of
+    /// one peer's state and half of its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state cannot be written. A failed import leaves the
+    /// previous state intact.
+    pub fn import(&self, state: &FullState, markers: &[(&str, &str)]) -> Result<()> {
+        let now = seconds_since_epoch()?;
+
+        // Sealed outside the transaction, so a sealing failure never leaves a
+        // half written state behind.
+        let mut sealed = Vec::new();
+        if let Some(held) = &state.snapshot {
+            for (id, secret) in &held.secrets {
+                sealed.push((
+                    id.as_str().to_owned(),
+                    seal(&self.key, id.as_str().as_bytes(), secret.expose())?,
+                ));
+            }
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(storage("a transaction could not be started"))?;
+
+        // Written out one statement at a time rather than built from a list of
+        // table names. A statement this code assembles is a statement nobody
+        // can read off the page, and the rule that keeps SQL injection out of
+        // this file is that no SQL is ever assembled here.
+        for statement in [
+            "DELETE FROM secret",
+            "DELETE FROM config_version",
+            "DELETE FROM audit_log",
+            "DELETE FROM cluster_identity",
+        ] {
+            transaction
+                .execute(statement, [])
+                .map_err(storage("the previous state could not be replaced"))?;
+        }
+
+        for (id, record) in &sealed {
+            transaction
+                .execute(
+                    "INSERT INTO secret (id, nonce, ciphertext) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, record.nonce, record.ciphertext],
+                )
+                .map_err(storage("a secret could not be written"))?;
+        }
+
+        if let Some(held) = &state.snapshot {
+            if let Some(cluster) = &held.cluster {
+                transaction
+                    .execute(
+                        "INSERT INTO cluster_identity (id, authority_pem) VALUES (?1, ?2)",
+                        rusqlite::params![STATE_ROW, cluster.authority_pem],
+                    )
+                    .map_err(storage("the cluster identity could not be written"))?;
+            }
+
+            let document = serde_json::to_string(&held.config).map_err(|error| {
+                Error::new(
+                    ErrorKind::Serialisation,
+                    format!("the config could not be written out: {error}"),
+                )
+            })?;
+            transaction
+                .execute(
+                    "INSERT INTO config_state (id, schema_version, document, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(id) DO UPDATE SET \
+                     schema_version = excluded.schema_version, \
+                     document = excluded.document, \
+                     updated_at = excluded.updated_at",
+                    rusqlite::params![
+                        STATE_ROW,
+                        i64::from(held.config.schema_version.get()),
+                        document,
+                        now
+                    ],
+                )
+                .map_err(storage("the config could not be written"))?;
+        }
+
+        // The identities travel with the rows. A node that renumbered them
+        // would hold a version history its peers do not recognise, and an
+        // operator rolling back on one node would reach a different config
+        // than on another (ADR-0083).
+        for version in &state.versions {
+            transaction
+                .execute(
+                    "INSERT INTO config_version \
+                     (id, recorded_at, author, description, schema_version, restored_from, document) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        version.id.get(),
+                        version.recorded_at_unix,
+                        version.author,
+                        version.description,
+                        i64::from(version.schema_version),
+                        version.restored_from.map(VersionId::get),
+                        version.document
+                    ],
+                )
+                .map_err(storage("a version could not be written"))?;
+        }
+
+        for record in &state.audit {
+            transaction
+                .execute(
+                    "INSERT INTO audit_log (recorded_at, actor, action, subject, detail) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        record.recorded_at_unix,
+                        record.actor,
+                        record.action,
+                        record.subject,
+                        record.detail
+                    ],
+                )
+                .map_err(storage("an audit record could not be written"))?;
+        }
+
+        for (name, value) in markers {
+            transaction
+                .execute(
+                    "INSERT INTO raft_marker (name, value) VALUES (?1, ?2) \
+                     ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![name, value],
+                )
+                .map_err(storage("a marker could not be written beside the state"))?;
+        }
+
+        transaction
+            .commit()
+            .map_err(storage("the imported state could not be committed"))
+    }
+}
+
+impl Journal for SqliteStore {
+    fn append(&self, records: &[Record]) -> Result<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(storage("a transaction could not be started"))?;
+        for record in records {
+            transaction
+                .execute(
+                    "INSERT INTO raft_log (idx, payload) VALUES (?1, ?2) \
+                     ON CONFLICT(idx) DO UPDATE SET payload = excluded.payload",
+                    rusqlite::params![as_i64(record.index)?, record.payload],
+                )
+                .map_err(storage("a log record could not be written"))?;
+        }
+        transaction
+            .commit()
+            .map_err(storage("the log records could not be committed"))
+    }
+
+    fn records(&self, from: u64, to: u64) -> Result<Vec<Record>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT idx, payload FROM raft_log WHERE idx >= ?1 AND idx < ?2 ORDER BY idx")
+            .map_err(storage("the log query could not be prepared"))?;
+        let rows = statement
+            .query_map([as_i64(from)?, as_i64(to)?], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage("the log could not be read"))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (index, payload) = row.map_err(storage("a log record could not be read"))?;
+            records.push(Record {
+                index: as_u64(index)?,
+                payload,
+            });
+        }
+        Ok(records)
+    }
+
+    fn span(&self) -> Result<Option<(u64, u64)>> {
+        let connection = self.connection()?;
+        let bounds: Option<(Option<i64>, Option<i64>)> = connection
+            .query_row("SELECT MIN(idx), MAX(idx) FROM raft_log", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(storage("the log bounds could not be read"))?;
+
+        match bounds {
+            Some((Some(first), Some(last))) => Ok(Some((as_u64(first)?, as_u64(last)?))),
+            _ => Ok(None),
+        }
+    }
+
+    fn truncate_from(&self, index: u64) -> Result<()> {
+        let connection = self.connection()?;
+        connection
+            .execute("DELETE FROM raft_log WHERE idx >= ?1", [as_i64(index)?])
+            .map_err(storage("the log tail could not be removed"))?;
+        Ok(())
+    }
+
+    fn purge_upto(&self, index: u64) -> Result<()> {
+        let connection = self.connection()?;
+        connection
+            .execute("DELETE FROM raft_log WHERE idx <= ?1", [as_i64(index)?])
+            .map_err(storage("the log head could not be removed"))?;
+        Ok(())
+    }
+
+    fn set_marker(&self, name: &str, value: Option<&str>) -> Result<()> {
+        let connection = self.connection()?;
+        match value {
+            Some(value) => connection
+                .execute(
+                    "INSERT INTO raft_marker (name, value) VALUES (?1, ?2) \
+                     ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![name, value],
+                )
+                .map_err(storage("a marker could not be written"))?,
+            None => connection
+                .execute("DELETE FROM raft_marker WHERE name = ?1", [name])
+                .map_err(storage("a marker could not be removed"))?,
+        };
+        Ok(())
+    }
+
+    fn marker(&self, name: &str) -> Result<Option<String>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT value FROM raft_marker WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage("a marker could not be read"))
+    }
+
+    fn set_snapshot(&self, meta: &str, data: &[u8]) -> Result<()> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "INSERT INTO raft_snapshot (id, meta, data) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET meta = excluded.meta, data = excluded.data",
+                rusqlite::params![STATE_ROW, meta, data],
+            )
+            .map_err(storage("the snapshot could not be written"))?;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<Option<(String, Vec<u8>)>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT meta, data FROM raft_snapshot WHERE id = ?1",
+                [STATE_ROW],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage("the snapshot could not be read"))
+    }
+}
+
+fn as_i64(value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        Error::new(
+            ErrorKind::Storage,
+            format!("a log position of {value} is beyond what this store holds"),
+        )
+    })
+}
+
+fn as_u64(value: i64) -> Result<u64> {
+    u64::try_from(value).map_err(|_| {
+        Error::new(
+            ErrorKind::Storage,
+            format!("a stored log position of {value} cannot be read"),
+        )
+    })
+}
+
 /// The schema.
 ///
 /// `audit_log` is created here and left empty. M8 fills it, and defining it
@@ -837,5 +1232,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action      TEXT    NOT NULL,
     subject     TEXT,
     detail      TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS raft_log (
+    idx     INTEGER PRIMARY KEY,
+    payload TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS raft_marker (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS raft_snapshot (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    meta TEXT NOT NULL,
+    data BLOB NOT NULL
 ) STRICT;
 ";
