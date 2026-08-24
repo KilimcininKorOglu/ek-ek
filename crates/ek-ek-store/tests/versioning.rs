@@ -9,7 +9,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use ek_ek_config::{
@@ -559,14 +558,7 @@ fn a_failed_write_leaves_the_history_alone() {
     // empty secret map below is legal, so this is the passing control; the
     // failing case is covered by the transaction around the whole write.
     store
-        .write(
-            &Snapshot {
-                config: config(1),
-                secrets: BTreeMap::new(),
-                cluster: None,
-            },
-            &change("admin", "second"),
-        )
+        .write(&Snapshot::new(config(1)), &change("admin", "second"))
         .expect("the write succeeds");
     let after = store.versions().expect("readable");
 

@@ -9,7 +9,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::PermissionsExt;
@@ -537,14 +536,7 @@ fn writing_an_empty_secret_map_clears_what_was_there() {
     );
 
     store
-        .write(
-            &Snapshot {
-                config: config(1),
-                secrets: BTreeMap::new(),
-                cluster: None,
-            },
-            &change(),
-        )
+        .write(&Snapshot::new(config(1)), &change())
         .expect("the write succeeds");
     assert!(
         store

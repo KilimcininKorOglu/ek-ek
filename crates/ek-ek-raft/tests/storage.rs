@@ -61,6 +61,7 @@ fn write(index: u64, nodes: u32, now_unix: i64) -> Entry<TypeConfig> {
             state: WireSnapshot::from(&snapshot(nodes)),
             change: (&change("replicated")).into(),
             now_unix,
+            audit: Vec::new(),
         }),
     }
 }
@@ -303,6 +304,7 @@ async fn a_snapshot_carries_the_state_the_history_and_the_authority() {
                 ),
                 change: (&change("replicated")).into(),
                 now_unix: 2_000,
+                audit: Vec::new(),
             }),
         }])
         .await
@@ -466,5 +468,97 @@ async fn a_state_travels_and_comes_back_as_what_it_was() {
         ek_ek_store::Snapshot::from(&WireSnapshot::from(&plain)),
         plain,
         "a state with no key material and no authority did not survive"
+    );
+}
+
+#[tokio::test]
+async fn a_token_and_a_refusal_travel_with_the_state_they_belong_to() {
+    // Both are outside the config document, so nothing that checks the
+    // document would notice either of them going missing on the way.
+    let held = snapshot(3)
+        .with_join(
+            ek_ek_store::TokenId::new("0123456789abcdef"),
+            ek_ek_store::JoinRecord {
+                secret_digest: "a digest".to_owned(),
+                expires_at_unix: 2_000,
+                used_by: Some(ek_ek_config::NodeId::new("node2")),
+                issued_by: "admin".to_owned(),
+                issued_at_unix: 1_000,
+            },
+        )
+        .with_removed(ek_ek_config::NodeId::new("node9"));
+
+    let back = ek_ek_store::Snapshot::from(&WireSnapshot::from(&held));
+    assert_eq!(back, held, "the state did not survive the round trip");
+}
+
+#[tokio::test]
+async fn an_audit_row_is_written_in_the_same_transaction_as_the_state() {
+    // A change that landed without its audit row would be a change nobody can
+    // account for, which is what the audit log exists to make impossible
+    // (ADR-0008, ADR-0084).
+    let (_directory, store) = opened();
+
+    let version = store
+        .apply_write(
+            &snapshot(2),
+            &change("replicated"),
+            1_700_000_000,
+            &[(marker::APPLIED, "{\"index\":1}")],
+            &[ek_ek_store::AuditRecord {
+                recorded_at_unix: 1_700_000_000,
+                actor: "node2".to_owned(),
+                action: "node.joined".to_owned(),
+                subject: Some("node2".to_owned()),
+                detail: Some("with a join token".to_owned()),
+            }],
+        )
+        .expect("the write succeeds");
+
+    let whole = store.export().expect("exported");
+    let written = whole
+        .audit
+        .iter()
+        .find(|record| record.action == "node.joined")
+        .expect("the audit row is beside the state");
+    assert_eq!(written.actor, "node2");
+    assert_eq!(written.subject.as_deref(), Some("node2"));
+    assert_eq!(written.recorded_at_unix, 1_700_000_000);
+
+    // And the state the row belongs to is there, so the two really did land
+    // together rather than the row landing alone.
+    assert_eq!(
+        store
+            .read()
+            .expect("readable")
+            .expect("a state")
+            .config
+            .nodes
+            .len(),
+        2
+    );
+    assert_eq!(version.get(), 1);
+
+    // A write carrying no rows adds none, so the loop above is not one that
+    // writes something whatever it is given.
+    store
+        .apply_write(
+            &snapshot(3),
+            &change("replicated again"),
+            1_700_000_001,
+            &[(marker::APPLIED, "{\"index\":2}")],
+            &[],
+        )
+        .expect("the write succeeds");
+    assert_eq!(
+        store
+            .export()
+            .expect("exported")
+            .audit
+            .iter()
+            .filter(|record| record.action == "node.joined")
+            .count(),
+        1,
+        "a write with no audit rows wrote one"
     );
 }

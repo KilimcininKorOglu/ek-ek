@@ -13,7 +13,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use ek_ek_config::template::{Argument, Arguments, apply, embedded_by_id};
@@ -72,11 +71,7 @@ fn arguments() -> Arguments {
 }
 
 fn snapshot(config: Config) -> Snapshot {
-    Snapshot {
-        config,
-        secrets: BTreeMap::new(),
-        cluster: None,
-    }
+    Snapshot::new(config)
 }
 
 fn data_directory() -> TempDir {

@@ -894,6 +894,7 @@ dependencies = [
  "ek-ek-config",
  "ek-ek-peer",
  "ek-ek-store",
+ "getrandom 0.4.3",
  "log",
  "openraft",
  "serde",

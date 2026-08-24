@@ -24,7 +24,7 @@ use openssl::bn::BigNum;
 use openssl::ec::{EcGroup, EcKey};
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
-use openssl::pkey::{PKey, Private};
+use openssl::pkey::{HasPublic, PKey, PKeyRef, Private};
 use openssl::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
     SubjectKeyIdentifier,
@@ -87,6 +87,21 @@ impl std::fmt::Debug for Authority {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("Authority").finish_non_exhaustive()
     }
+}
+
+/// One node's certificate, without the key it belongs to.
+///
+/// This is what the cluster hands back when a node made its own key and asked
+/// for it to be certified: the signer never sees the private half, so it has
+/// nothing else to give (ADR-0084).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signed {
+    /// The node certificate, in PEM.
+    pub certificate_pem: String,
+    /// When the certificate starts being valid.
+    pub not_before_unix: i64,
+    /// When it stops.
+    pub not_after_unix: i64,
 }
 
 /// One node's certificate and the key it belongs to.
@@ -227,6 +242,41 @@ pub fn issue(
     addresses: &[IpAddr],
     now_unix: i64,
 ) -> Result<Issued, Failure> {
+    let key = generate_key()?;
+    let signed = sign_for(authority, node, addresses, now_unix, &key)?;
+
+    Ok(Issued {
+        certificate_pem: signed.certificate_pem,
+        key_pem: Secret::new(
+            key.private_key_to_pem_pkcs8()
+                .map_err(crypto("the node key could not be written out"))?,
+        ),
+        not_before_unix: signed.not_before_unix,
+        not_after_unix: signed.not_after_unix,
+    })
+}
+
+/// Signs a certificate for one node against a public key that already exists.
+///
+/// The key is a parameter because a joining node makes its own and sends only
+/// the public half. Everything else about the certificate is decided here, by
+/// the cluster: a node does not name itself (ADR-0084).
+///
+/// # Errors
+///
+/// Returns [`Reason::Configuration`] when the node has no identity to carry,
+/// and [`Reason::Crypto`] when the authority does not read back or the
+/// certificate cannot be signed.
+pub fn sign_for<T>(
+    authority: &Authority,
+    node: &NodeId,
+    addresses: &[IpAddr],
+    now_unix: i64,
+    key: &PKeyRef<T>,
+) -> Result<Signed, Failure>
+where
+    T: HasPublic,
+{
     if node.as_str().is_empty() {
         return Err(Failure::new(
             Reason::Configuration,
@@ -236,7 +286,6 @@ pub fn issue(
 
     let signer = authority_key(authority)?;
     let issuer = authority_certificate(authority)?;
-    let key = generate_key()?;
 
     let mut subject = X509Name::builder().map_err(crypto("the node name could not be built"))?;
     subject
@@ -259,7 +308,7 @@ pub fn issue(
         .set_issuer_name(issuer.subject_name())
         .map_err(crypto("the issuer could not be set"))?;
     builder
-        .set_pubkey(&key)
+        .set_pubkey(key)
         .map_err(crypto("the public key could not be set"))?;
     let (not_before_unix, not_after_unix) = set_window(&mut builder, now_unix, NODE_LIFETIME_DAYS)?;
 
@@ -333,15 +382,33 @@ pub fn issue(
         .map_err(crypto("the node certificate could not be signed"))?;
     let certificate = builder.build();
 
-    Ok(Issued {
+    Ok(Signed {
         certificate_pem: pem_of(&certificate)?,
-        key_pem: Secret::new(
-            key.private_key_to_pem_pkcs8()
-                .map_err(crypto("the node key could not be written out"))?,
-        ),
         not_before_unix,
         not_after_unix,
     })
+}
+
+/// Whether an authority signed a certificate.
+///
+/// What a joining node asks about the certificate it was served, once the
+/// exchange hands it the authority the token's fingerprint names. Without this
+/// second half the fingerprint proves only that somebody knows a public value
+/// (ADR-0084).
+///
+/// # Errors
+///
+/// Returns [`Reason::Crypto`] when the authority does not read back or the
+/// signature cannot be checked.
+pub fn signed_by(certificate: &X509, authority_pem: &str) -> Result<bool, Failure> {
+    let authority = X509::from_pem(authority_pem.as_bytes())
+        .map_err(crypto("the cluster authority does not read back"))?;
+    let key = authority
+        .public_key()
+        .map_err(crypto("the cluster authority carries no public key"))?;
+    certificate
+        .verify(&key)
+        .map_err(crypto("the certificate signature could not be checked"))
 }
 
 /// Reads the node identity out of a certificate's subject.
@@ -392,7 +459,7 @@ fn common_name(name: &X509NameRef) -> Result<String, Failure> {
         .map_err(crypto("a common name could not be read"))
 }
 
-fn generate_key() -> Result<PKey<Private>, Failure> {
+pub(crate) fn generate_key() -> Result<PKey<Private>, Failure> {
     let group = EcGroup::from_curve_name(CURVE).map_err(crypto("no P-256 group"))?;
     let generated = EcKey::generate(&group).map_err(crypto("no key"))?;
     PKey::from_ec_key(generated).map_err(crypto("the key does not wrap"))

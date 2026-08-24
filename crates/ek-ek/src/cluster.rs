@@ -246,10 +246,8 @@ pub fn serve(arguments: &ServeArguments<'_>) -> ExitCode {
         // runs, not with a diagnostic command (ADR-0083).
         let listener = match ek_ek_peer::Listener::bind(
             arguments.listen,
-            &node,
-            SCHEMA_VERSION,
             &credentials,
-            Arc::new(ek_ek_peer::NoServices),
+            ek_ek_peer::Listening::new(&node, SCHEMA_VERSION, Arc::new(ek_ek_peer::NoServices)),
         )
         .await
         {
@@ -274,7 +272,7 @@ pub fn serve(arguments: &ServeArguments<'_>) -> ExitCode {
                 Ok(served) => say(&format!(
                     r#"{{"kind":"cluster","ts":{},"event":"served","caller":"{}"}}"#,
                     now(),
-                    escape(served.caller.as_str())
+                    escape(served.caller.as_ref().map_or("", NodeId::as_str))
                 )),
                 // Said rather than swallowed. A refused peer is the most
                 // interesting thing this command ever sees.

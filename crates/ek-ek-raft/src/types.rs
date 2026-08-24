@@ -13,9 +13,10 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use ek_ek_config::{Config, SecretId};
+use ek_ek_config::{Config, NodeId, SecretId};
 use ek_ek_store::{
-    AuditRecord, Change, ClusterIdentity, FullState, Secret, Snapshot, StoredVersion, VersionId,
+    AuditRecord, Change, ClusterIdentity, FullState, JoinRecord, Secret, Snapshot, StoredVersion,
+    TokenId, VersionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +87,15 @@ pub struct WriteRequest {
     /// own clock into the version log would give three nodes three histories
     /// (ADR-0083).
     pub now_unix: i64,
+    /// Audit rows to write in the same transaction as the state.
+    ///
+    /// Carried here rather than written by a second call, because two calls
+    /// mean a leader can fall between them and leave a change nobody can
+    /// account for. What the caller knows (which token, which address) is not
+    /// in the state machine, so the state machine cannot derive these rows
+    /// either (ADR-0008, ADR-0084).
+    #[serde(default)]
+    pub audit: Vec<WireAudit>,
 }
 
 /// What a replicated write produced.
@@ -137,6 +147,31 @@ pub struct WireSnapshot {
     pub secrets: BTreeMap<String, Vec<u8>>,
     /// The cluster authority certificate, when this cluster has one.
     pub cluster: Option<String>,
+    /// Join tokens the cluster has issued, by their identity.
+    #[serde(default)]
+    pub joins: BTreeMap<String, WireJoin>,
+    /// Nodes this cluster has removed, by name.
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
+/// One join token, as it travels.
+///
+/// The secret is not here and never was. Only its digest is stored, so only its
+/// digest replicates (ADR-0084).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireJoin {
+    /// The digest of the secret the token carries.
+    pub secret_digest: String,
+    /// When the token stops being usable, as a Unix timestamp in seconds.
+    pub expires_at_unix: i64,
+    /// Which node used it, when one has.
+    pub used_by: Option<String>,
+    /// Who asked for the token.
+    pub issued_by: String,
+    /// When it was issued, as a Unix timestamp in seconds.
+    pub issued_at_unix: i64,
 }
 
 impl From<&Snapshot> for WireSnapshot {
@@ -152,6 +187,27 @@ impl From<&Snapshot> for WireSnapshot {
                 .cluster
                 .as_ref()
                 .map(|identity| identity.authority_pem.clone()),
+            joins: state
+                .joins
+                .iter()
+                .map(|(id, record)| {
+                    (
+                        id.as_str().to_owned(),
+                        WireJoin {
+                            secret_digest: record.secret_digest.clone(),
+                            expires_at_unix: record.expires_at_unix,
+                            used_by: record.used_by.as_ref().map(|node| node.as_str().to_owned()),
+                            issued_by: record.issued_by.clone(),
+                            issued_at_unix: record.issued_at_unix,
+                        },
+                    )
+                })
+                .collect(),
+            removed: state
+                .removed
+                .iter()
+                .map(|node| node.as_str().to_owned())
+                .collect(),
         }
     }
 }
@@ -166,6 +222,23 @@ impl From<&WireSnapshot> for Snapshot {
                 .map(|(id, bytes)| (SecretId::new(id), Secret::new(bytes.clone())))
                 .collect(),
             cluster: state.cluster.as_ref().map(ClusterIdentity::new),
+            joins: state
+                .joins
+                .iter()
+                .map(|(id, record)| {
+                    (
+                        TokenId::new(id),
+                        JoinRecord {
+                            secret_digest: record.secret_digest.clone(),
+                            expires_at_unix: record.expires_at_unix,
+                            used_by: record.used_by.as_ref().map(NodeId::new),
+                            issued_by: record.issued_by.clone(),
+                            issued_at_unix: record.issued_at_unix,
+                        },
+                    )
+                })
+                .collect(),
+            removed: state.removed.iter().map(NodeId::new).collect(),
         }
     }
 }
@@ -218,6 +291,30 @@ pub struct WireAudit {
     pub detail: Option<String>,
 }
 
+impl From<&AuditRecord> for WireAudit {
+    fn from(record: &AuditRecord) -> Self {
+        Self {
+            recorded_at_unix: record.recorded_at_unix,
+            actor: record.actor.clone(),
+            action: record.action.clone(),
+            subject: record.subject.clone(),
+            detail: record.detail.clone(),
+        }
+    }
+}
+
+impl From<&WireAudit> for AuditRecord {
+    fn from(record: &WireAudit) -> Self {
+        Self {
+            recorded_at_unix: record.recorded_at_unix,
+            actor: record.actor.clone(),
+            action: record.action.clone(),
+            subject: record.subject.clone(),
+            detail: record.detail.clone(),
+        }
+    }
+}
+
 impl From<&FullState> for WireState {
     fn from(state: &FullState) -> Self {
         Self {
@@ -235,17 +332,7 @@ impl From<&FullState> for WireState {
                     document: version.document.clone(),
                 })
                 .collect(),
-            audit: state
-                .audit
-                .iter()
-                .map(|record| WireAudit {
-                    recorded_at_unix: record.recorded_at_unix,
-                    actor: record.actor.clone(),
-                    action: record.action.clone(),
-                    subject: record.subject.clone(),
-                    detail: record.detail.clone(),
-                })
-                .collect(),
+            audit: state.audit.iter().map(WireAudit::from).collect(),
         }
     }
 }
@@ -267,17 +354,7 @@ impl From<&WireState> for FullState {
                     document: version.document.clone(),
                 })
                 .collect(),
-            audit: state
-                .audit
-                .iter()
-                .map(|record| AuditRecord {
-                    recorded_at_unix: record.recorded_at_unix,
-                    actor: record.actor.clone(),
-                    action: record.action.clone(),
-                    subject: record.subject.clone(),
-                    detail: record.detail.clone(),
-                })
-                .collect(),
+            audit: state.audit.iter().map(AuditRecord::from).collect(),
         }
     }
 }

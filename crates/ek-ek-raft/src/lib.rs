@@ -40,9 +40,11 @@ pub mod cluster;
 pub mod error;
 pub mod fault;
 pub mod identity;
+pub mod join;
 pub mod log;
 pub mod machine;
 pub mod network;
+pub mod token;
 pub mod types;
 
 pub use cluster::{
@@ -51,10 +53,16 @@ pub use cluster::{
 };
 pub use error::{Failure, Reason, Result};
 pub use identity::DOMAIN;
+pub use join::{
+    Admission, Clock, Joined, Joining, NODE_JOINED, NODE_REMOVED, Refusals, TOKEN_MINTED,
+};
 pub use log::LogStore;
 pub use machine::Applied;
 pub use machine::{StateMachine, read_local, snapshot_now};
 pub use network::{APPEND_ENTRIES, Dialler, INSTALL_SNAPSHOT, RaftService, VOTE, Wire, service};
+pub use token::{
+    FORMAT, ID_CHARACTERS, LIFETIME_SECONDS, SECRET_CHARACTERS, Token, digest, presented,
+};
 pub use types::{
     NodeNumber, PeerNode, TypeConfig, WireAudit, WireChange, WireSnapshot, WireState, WireVersion,
     WriteRequest, WriteResponse,

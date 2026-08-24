@@ -22,7 +22,9 @@ use std::sync::Arc;
 use std::thread;
 
 use ek_ek_config::NodeId;
-use ek_ek_peer::{Credentials, Failure, Listener, NoServices, PROTOCOL, Reason, Served, Service};
+use ek_ek_peer::{
+    Credentials, Failure, Listener, Listening, NoServices, PROTOCOL, Peer, Reason, Served, Service,
+};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
 
 mod common;
@@ -46,10 +48,8 @@ async fn listening_at(
 ) -> (Listener, SocketAddr) {
     let listener = Listener::bind(
         "127.0.0.1:0",
-        &NodeId::new(node),
-        schema_version,
         credentials,
-        service,
+        Listening::new(&NodeId::new(node), schema_version, service),
     )
     .await
     .expect("the peer port opens");
@@ -62,18 +62,45 @@ fn answering(listener: Listener) -> tokio::task::JoinHandle<Result<Served, Failu
     tokio::spawn(async move { listener.serve_one().await })
 }
 
+/// A listener that opens one service to a caller with no certificate.
+async fn opening(
+    node: &str,
+    credentials: &Credentials,
+    service: Arc<dyn Service>,
+    open: &str,
+) -> (Listener, SocketAddr) {
+    let listener = Listener::bind(
+        "127.0.0.1:0",
+        credentials,
+        Listening::new(&NodeId::new(node), SCHEMA, service).opening(open),
+    )
+    .await
+    .expect("the peer port opens");
+    let address = listener.address().expect("the port is readable");
+    (listener, address)
+}
+
+/// A gate that turns one name away.
+struct Barred(NodeId);
+
+impl ek_ek_peer::Gate for Barred {
+    fn refuses(&self, caller: &NodeId) -> bool {
+        *caller == self.0
+    }
+}
+
 /// A service that answers one name and refuses everything else.
 struct Echo;
 
 impl Service for Echo {
     fn call(
         &self,
-        from: &NodeId,
+        from: Option<&NodeId>,
         service: &str,
         body: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, Failure>> + Send + '_>> {
         let named = service.to_owned();
-        let caller = from.as_str().to_owned();
+        let caller = from.map(|node| node.as_str().to_owned());
         Box::pin(async move {
             if named == "echo" {
                 Ok(serde_json::json!({ "from": caller, "body": body }))
@@ -109,7 +136,7 @@ async fn two_nodes_of_the_same_cluster_reach_each_other() {
     // The caller is named by the certificate it presented and by nothing it
     // said. Anybody can claim a name in a message; only one of them was
     // signed by the authority.
-    assert_eq!(served.caller, NodeId::new("node-2"));
+    assert_eq!(served.caller, Some(NodeId::new("node-2")));
 }
 
 #[tokio::test]
@@ -311,7 +338,7 @@ async fn a_message_this_release_cannot_read_is_refused_by_name() {
         .await
         .expect("the task finishes")
         .expect("the peer was served");
-    assert_eq!(served.caller, NodeId::new("node-2"));
+    assert_eq!(served.caller, Some(NodeId::new("node-2")));
     assert_eq!(
         served.calls, 0,
         "an unreadable line was taken for a call: {served:?}"
@@ -622,4 +649,154 @@ fn with_material(builder: &mut openssl::ssl::SslConnectorBuilder, credentials: &
     builder.set_cert_store(store.build());
     builder.set_certificate(&certificate).expect("accepted");
     builder.set_private_key(&key).expect("accepted");
+}
+
+#[tokio::test]
+async fn a_caller_with_no_certificate_reaches_the_open_service_and_nothing_else() {
+    // The whole of what an open service means. A node with no certificate yet
+    // has to be able to ask for one, and must not be able to ask for anything
+    // else on the way (ADR-0084).
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+
+    let (listener, address) = opening("node-1", &server, Arc::new(Echo), "echo").await;
+    let serving = tokio::spawn(Arc::new(listener).serve_forever());
+
+    let mut peer = Peer::dial_unproven(address, SCHEMA)
+        .await
+        .expect("a caller with no certificate reaches an open listener");
+
+    let answered = peer
+        .call("echo", serde_json::json!({ "said": "hello" }))
+        .await
+        .expect("the open service answers");
+    assert_eq!(answered["body"]["said"], "hello");
+    // The service is told the caller has no name, so it can decide what an
+    // unnamed caller may do rather than assume one.
+    assert_eq!(answered["from"], serde_json::Value::Null);
+
+    // The same connection, a different name. Refused by the listener rather
+    // than by the service, so a service added later cannot forget the rule.
+    let mut peer = Peer::dial_unproven(address, SCHEMA)
+        .await
+        .expect("a second connection opens");
+    let refused = peer
+        .call("something-else", serde_json::json!({}))
+        .await
+        .expect_err("only the open service is open");
+    assert!(
+        refused.detail().contains(ek_ek_peer::NOT_OPEN),
+        "the refusal does not say the service is closed to this caller: {refused}"
+    );
+
+    serving.abort();
+}
+
+#[tokio::test]
+async fn a_caller_that_holds_a_certificate_reaches_the_service_the_other_could_not() {
+    // The other side of the rule above. Without this, a listener that refused
+    // every name would pass that measurement.
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+    let caller = credentials(&authority, &issue(&authority, "node-2"));
+
+    let (listener, address) = opening("node-1", &server, Arc::new(Echo), "join").await;
+    let serving = tokio::spawn(Arc::new(listener).serve_forever());
+
+    let mut peer = Peer::dial(address, &NodeId::new("node-1"), SCHEMA, &caller)
+        .await
+        .expect("a node of this cluster reaches the listener");
+    let answered = peer
+        .call("echo", serde_json::json!({ "said": "hello" }))
+        .await
+        .expect("a named caller reaches a service that is not open");
+    assert_eq!(answered["from"], "node-2");
+
+    serving.abort();
+}
+
+#[test]
+fn a_listener_opens_what_it_was_told_to_open_and_no_more() {
+    // The set decides who may reach what. One extra name in it is one service
+    // a caller with no certificate can reach, so the set is measured rather
+    // than only the behaviour it produces.
+    let plain = Listening::new(&NodeId::new("node-1"), SCHEMA, Arc::new(NoServices));
+    assert!(
+        plain.open.is_empty(),
+        "a listener opens something by default: {:?}",
+        plain.open
+    );
+
+    let opened = plain.opening("cluster.join");
+    assert_eq!(
+        opened.open.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["cluster.join"],
+        "the listener opened something it was not told to"
+    );
+}
+
+#[tokio::test]
+async fn a_listener_that_opens_nothing_still_demands_a_certificate() {
+    // The setting that decides this is one flag. A listener that opened a
+    // service would drop it, and every listener that opens none has to keep it
+    // (ADR-0084).
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+
+    let (listener, address) = listening("node-1", &server).await;
+    let serving = tokio::spawn(Arc::new(listener).serve_forever());
+
+    let refused = Peer::dial_unproven(address, SCHEMA)
+        .await
+        .expect_err("a listener that opens nothing takes no unnamed caller");
+    // The alert the listener sent, read back. In TLS 1.3 a client learns it
+    // was refused only when it tries to use the connection, so this arrives as
+    // a read failure carrying what the far end said.
+    assert!(
+        refused.detail().contains("certificate required"),
+        "the listener let a caller with no certificate through: {refused}"
+    );
+
+    serving.abort();
+}
+
+#[tokio::test]
+async fn a_removed_caller_is_turned_away_by_name() {
+    // Its certificate is valid, was signed by this authority, and nothing
+    // revoked it. The list is the only thing that stops it (R-32, ADR-0084).
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+    let cast_out = credentials(&authority, &issue(&authority, "node-2"));
+    let still_in = credentials(&authority, &issue(&authority, "node-3"));
+
+    let listener = Listener::bind(
+        "127.0.0.1:0",
+        &server,
+        Listening::new(&NodeId::new("node-1"), SCHEMA, Arc::new(Echo))
+            .behind(Arc::new(Barred(NodeId::new("node-2")))),
+    )
+    .await
+    .expect("the peer port opens");
+    let address = listener.address().expect("the port is readable");
+    let serving = tokio::spawn(Arc::new(listener).serve_forever());
+
+    let refused = Peer::dial(address, &NodeId::new("node-1"), SCHEMA, &cast_out)
+        .await
+        .expect_err("a removed caller is not answered");
+    assert!(
+        refused.detail().contains(ek_ek_peer::REMOVED),
+        "the refusal does not say the caller was removed: {refused}"
+    );
+    assert!(
+        refused.detail().contains("node-2"),
+        "the refusal does not name the caller: {refused}"
+    );
+
+    // And a caller that is not on the list is answered, so the gate is about
+    // the name and not about refusing everybody.
+    Peer::dial(address, &NodeId::new("node-1"), SCHEMA, &still_in)
+        .await
+        .expect("a caller that was not removed is answered");
+
+    serving.abort();
 }

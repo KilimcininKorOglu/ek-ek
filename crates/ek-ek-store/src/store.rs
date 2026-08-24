@@ -13,10 +13,11 @@
 
 use std::collections::BTreeMap;
 
-use ek_ek_config::{Config, SecretId};
+use ek_ek_config::{Config, NodeId, SecretId};
 
 use crate::cluster::ClusterIdentity;
 use crate::error::Result;
+use crate::membership::{JoinRecord, Removed, TokenId};
 use crate::secret::Secret;
 use crate::version::{Change, VersionId};
 
@@ -40,6 +41,19 @@ pub struct Snapshot {
     /// identity is not in the config document at all: `roll_back_to` restores
     /// a document and carries this field forward untouched.
     pub cluster: Option<ClusterIdentity>,
+    /// Join tokens the cluster has issued, by their identity.
+    ///
+    /// Here rather than in the config for the same reason the authority is: an
+    /// operator writes none of it, and a rollback to last week must not
+    /// resurrect a token that was already used (ADR-0084).
+    pub joins: BTreeMap<TokenId, JoinRecord>,
+    /// Nodes this cluster has removed.
+    ///
+    /// A removed node's certificate stays valid until it runs out, so this is
+    /// what stops it speaking to the cluster in the meantime. Every node holds
+    /// the same list, which is what keeps one node from quietly readmitting a
+    /// caller the others refuse (ADR-0084).
+    pub removed: Removed,
 }
 
 impl Snapshot {
@@ -50,7 +64,23 @@ impl Snapshot {
             config,
             secrets: BTreeMap::new(),
             cluster: None,
+            joins: BTreeMap::new(),
+            removed: Removed::new(),
         }
+    }
+
+    /// Adds a join token.
+    #[must_use]
+    pub fn with_join(mut self, id: TokenId, record: JoinRecord) -> Self {
+        self.joins.insert(id, record);
+        self
+    }
+
+    /// Marks a node as removed.
+    #[must_use]
+    pub fn with_removed(mut self, node: NodeId) -> Self {
+        self.removed.insert(node);
+        self
     }
 
     /// Adds key material under an identity.

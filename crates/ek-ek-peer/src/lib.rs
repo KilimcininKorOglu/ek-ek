@@ -36,21 +36,25 @@ pub mod fingerprint;
 pub mod message;
 pub mod record;
 pub mod renewal;
+pub mod request;
 pub mod wire;
 
 pub use authority::{
     AUTHORITY_COMMON_NAME, AUTHORITY_LIFETIME_DAYS, Authority, CLOCK_SKEW_ALLOWANCE_SECONDS,
-    Issued, NODE_LIFETIME_DAYS, authority_certificate, authority_key, create, identity_of, issue,
+    Issued, NODE_LIFETIME_DAYS, Signed, authority_certificate, authority_key, create, identity_of,
+    issue, sign_for, signed_by,
 };
 pub use channel::{
-    Credentials, DEFAULT_PORT, Listener, NoServices, PATIENCE, Peer, Served, Service, ask_health,
+    Credentials, DEFAULT_PORT, Gate, Listener, Listening, NoGate, NoServices, PATIENCE, Peer,
+    Served, Service, ask_health,
 };
 pub use error::{Failure, Reason};
 pub use fingerprint::{FINGERPRINT_CHARACTERS, fingerprint, matches, well_formed};
 pub use message::{
-    Answer, Ask, Call, HealthAnswer, HealthAsk, Hello, HelloAnswer, NO_HELLO, NO_SERVICE, PROTOCOL,
-    Refusal, Reply, UNREADABLE, WRONG_PROTOCOL, WRONG_SCHEMA,
+    Answer, Ask, Call, HealthAnswer, HealthAsk, Hello, HelloAnswer, NO_HELLO, NO_SERVICE, NOT_OPEN,
+    PROTOCOL, REMOVED, Refusal, Reply, UNREADABLE, WRONG_PROTOCOL, WRONG_SCHEMA,
 };
 pub use record::{AUTHORITY_KEY_SECRET, authority_key_id, install, present, read};
 pub use renewal::{RENEW_AT, due, expired, remaining, unix_of, window_of, window_of_pem};
+pub use request::{REQUEST_COMMON_NAME, Requested, certify, key_of, public_key, request};
 pub use wire::{MOST_LINE_BYTES, decode, encode};

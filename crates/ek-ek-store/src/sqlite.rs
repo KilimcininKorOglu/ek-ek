@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ek_ek_config::{Config, SchemaVersion, SecretId};
+use ek_ek_config::{Config, NodeId, SchemaVersion, SecretId};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::cluster::ClusterIdentity;
@@ -21,6 +21,7 @@ use crate::crypto::{Sealed, open, seal};
 use crate::error::{Error, ErrorKind, Result};
 use crate::journal::{AuditRecord, FullState, Journal, Record, StoredVersion};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
+use crate::membership::{JoinRecord, Removed, TokenId};
 use crate::migration::{MIGRATIONS, Migration, migrate_document, target_version};
 use crate::secret::Secret;
 use crate::store::{Snapshot, Store};
@@ -378,6 +379,8 @@ impl Store for SqliteStore {
             config,
             secrets,
             cluster: authority_pem.map(ClusterIdentity::new),
+            joins: read_joins(&connection)?,
+            removed: read_removed(&connection)?,
         }))
     }
 
@@ -386,7 +389,7 @@ impl Store for SqliteStore {
     }
 
     fn write_at(&self, snapshot: &Snapshot, change: &Change, now_unix: i64) -> Result<VersionId> {
-        self.write_version(snapshot, change, None, now_unix, &[])
+        self.write_version(snapshot, change, None, now_unix, &[], &[])
     }
 }
 
@@ -408,8 +411,9 @@ impl SqliteStore {
         change: &Change,
         now_unix: i64,
         markers: &[(&str, &str)],
+        audit: &[AuditRecord],
     ) -> Result<VersionId> {
-        self.write_version(snapshot, change, None, now_unix, markers)
+        self.write_version(snapshot, change, None, now_unix, markers, audit)
     }
 
     fn write_version(
@@ -419,6 +423,7 @@ impl SqliteStore {
         restored: Option<VersionId>,
         now: i64,
         markers: &[(&str, &str)],
+        audit: &[AuditRecord],
     ) -> Result<VersionId> {
         let document = serde_json::to_string(&snapshot.config).map_err(|error| {
             Error::new(
@@ -490,8 +495,35 @@ impl SqliteStore {
                 .map_err(storage("the cluster identity could not be written"))?;
         }
 
+        // Replaced whole, like everything else in a state. A token that
+        // survived a write which removed it would be a token the cluster
+        // believes it withdrew (ADR-0084).
+        write_joins(&transaction, snapshot)?;
+        write_removed(&transaction, snapshot)?;
+
         let version = append_version(&transaction, &document, snapshot, change, restored, now)?;
         prune(&transaction, change, now)?;
+
+        // In the same transaction as the state above. A change that landed
+        // without its audit row would be a change nobody can account for, which
+        // is the one thing this log exists to make impossible (ADR-0008).
+        for record in audit {
+            transaction
+                .execute(
+                    "INSERT INTO audit_log (recorded_at, actor, action, subject, detail) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        record.recorded_at_unix,
+                        record.actor,
+                        record.action,
+                        record.subject,
+                        record.detail
+                    ],
+                )
+                .map_err(storage(
+                    "an audit record could not be written beside the state",
+                ))?;
+        }
 
         for (name, value) in markers {
             transaction
@@ -612,12 +644,26 @@ impl History for SqliteStore {
         let mut config = restored;
         config.certificates = current.config.certificates.clone();
 
+        // The join tokens and the removed nodes are carried forward for the
+        // same reason the authority is: none of them is in the config document
+        // at all. A rollback that resurrected a used token or readmitted a
+        // removed node would undo a security decision by restoring a
+        // configuration (ADR-0084).
         let snapshot = Snapshot {
             config,
             secrets: current.secrets,
             cluster: current.cluster,
+            joins: current.joins,
+            removed: current.removed,
         };
-        self.write_version(&snapshot, change, Some(id), seconds_since_epoch()?, &[])
+        self.write_version(
+            &snapshot,
+            change,
+            Some(id),
+            seconds_since_epoch()?,
+            &[],
+            &[],
+        )
     }
 
     fn prunings(&self) -> Result<Vec<PruningRecord>> {
@@ -813,6 +859,108 @@ fn version_ids(transaction: &Transaction<'_>) -> Result<Vec<i64>> {
     Ok(ids)
 }
 
+/// Reads the join tokens the cluster holds.
+fn read_joins(connection: &Connection) -> Result<BTreeMap<TokenId, JoinRecord>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, secret_digest, expires_at, used_by, issued_by, issued_at \
+             FROM join_token ORDER BY id",
+        )
+        .map_err(storage("the join tokens could not be prepared"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(storage("the join tokens could not be read"))?;
+
+    let mut held = BTreeMap::new();
+    for row in rows {
+        let (id, secret_digest, expires_at, used_by, issued_by, issued_at) =
+            row.map_err(storage("a join token could not be read"))?;
+        held.insert(
+            TokenId::new(id),
+            JoinRecord {
+                secret_digest,
+                expires_at_unix: expires_at,
+                used_by: used_by.map(NodeId::new),
+                issued_by,
+                issued_at_unix: issued_at,
+            },
+        );
+    }
+    Ok(held)
+}
+
+/// Reads the nodes this cluster has removed.
+fn read_removed(connection: &Connection) -> Result<Removed> {
+    let mut statement = connection
+        .prepare("SELECT node FROM removed_node ORDER BY node")
+        .map_err(storage("the removed nodes could not be prepared"))?;
+
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(storage("the removed nodes could not be read"))?;
+
+    let mut held = Removed::new();
+    for row in rows {
+        held.insert(NodeId::new(
+            row.map_err(storage("a removed node could not be read"))?,
+        ));
+    }
+    Ok(held)
+}
+
+/// Replaces the join tokens with the ones the state carries.
+fn write_joins(transaction: &Transaction<'_>, snapshot: &Snapshot) -> Result<()> {
+    transaction
+        .execute("DELETE FROM join_token", [])
+        .map_err(storage("the previous join tokens could not be replaced"))?;
+
+    for (id, record) in &snapshot.joins {
+        transaction
+            .execute(
+                "INSERT INTO join_token \
+                 (id, secret_digest, expires_at, used_by, issued_by, issued_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    id.as_str(),
+                    record.secret_digest,
+                    record.expires_at_unix,
+                    record.used_by.as_ref().map(NodeId::as_str),
+                    record.issued_by,
+                    record.issued_at_unix
+                ],
+            )
+            .map_err(storage("a join token could not be written"))?;
+    }
+    Ok(())
+}
+
+/// Replaces the removed nodes with the ones the state carries.
+fn write_removed(transaction: &Transaction<'_>, snapshot: &Snapshot) -> Result<()> {
+    transaction
+        .execute("DELETE FROM removed_node", [])
+        .map_err(storage("the previous removed nodes could not be replaced"))?;
+
+    for node in &snapshot.removed {
+        transaction
+            .execute(
+                "INSERT INTO removed_node (node) VALUES (?1)",
+                [node.as_str()],
+            )
+            .map_err(storage("a removed node could not be written"))?;
+    }
+    Ok(())
+}
+
 fn storage(what: &'static str) -> impl Fn(rusqlite::Error) -> Error {
     move |error| Error::new(ErrorKind::Storage, format!("{what}: {error}"))
 }
@@ -934,15 +1082,23 @@ impl SqliteStore {
             .transaction()
             .map_err(storage("a transaction could not be started"))?;
 
+        // Everything the state describes is cleared first, the config row
+        // included. A snapshot carrying no state is a cluster that has written
+        // nothing, and a node keeping its old config after receiving one would
+        // hold a document with no version history behind it.
+        //
         // Written out one statement at a time rather than built from a list of
         // table names. A statement this code assembles is a statement nobody
         // can read off the page, and the rule that keeps SQL injection out of
         // this file is that no SQL is ever assembled here.
         for statement in [
             "DELETE FROM secret",
+            "DELETE FROM config_state",
             "DELETE FROM config_version",
             "DELETE FROM audit_log",
             "DELETE FROM cluster_identity",
+            "DELETE FROM join_token",
+            "DELETE FROM removed_node",
         ] {
             transaction
                 .execute(statement, [])
@@ -967,6 +1123,12 @@ impl SqliteStore {
                     )
                     .map_err(storage("the cluster identity could not be written"))?;
             }
+
+            // The tokens and the removed nodes travel with everything else. A
+            // node that caught up without them would readmit a caller its
+            // peers refuse and honour a token they consider spent (ADR-0084).
+            write_joins(&transaction, held)?;
+            write_removed(&transaction, held)?;
 
             let document = serde_json::to_string(&held.config).map_err(|error| {
                 Error::new(
@@ -1218,6 +1380,19 @@ CREATE TABLE IF NOT EXISTS secret (
     id         TEXT PRIMARY KEY,
     nonce      BLOB NOT NULL,
     ciphertext BLOB NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS join_token (
+    id             TEXT    PRIMARY KEY,
+    secret_digest  TEXT    NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    used_by        TEXT,
+    issued_by      TEXT    NOT NULL,
+    issued_at      INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS removed_node (
+    node TEXT PRIMARY KEY
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS cluster_identity (

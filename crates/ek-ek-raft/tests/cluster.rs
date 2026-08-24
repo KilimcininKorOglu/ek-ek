@@ -747,7 +747,7 @@ async fn a_raft_call_this_node_does_not_answer_is_refused_by_name() {
     let caller = fleet.follower().id.clone();
 
     let refused = service
-        .call(&caller, "raft.something_else", serde_json::json!({}))
+        .call(Some(&caller), "raft.something_else", serde_json::json!({}))
         .await
         .expect_err("a service this node does not run is refused");
     assert!(
@@ -759,7 +759,7 @@ async fn a_raft_call_this_node_does_not_answer_is_refused_by_name() {
     // the service refusing everything.
     let answered = service
         .call(
-            &caller,
+            Some(&caller),
             ek_ek_raft::VOTE,
             serde_json::to_value(openraft::raft::VoteRequest::new(
                 openraft::Vote::new(99, ek_ek_raft::identity::of(&caller)),

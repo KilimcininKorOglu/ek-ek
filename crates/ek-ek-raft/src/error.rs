@@ -32,17 +32,24 @@ pub enum Reason {
     Configuration,
     /// A peer runs a schema this release cannot replicate with.
     Schema,
+    /// A key, a digest or a certificate could not be produced.
+    Crypto,
+    /// The cluster refused the caller: a token that does not check out, a node
+    /// it has removed, a name it will not admit.
+    Rejected,
 }
 
 impl Reason {
     /// Every reason, so a test can walk the whole set.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::NotLeader,
         Self::NoQuorum,
         Self::Consensus,
         Self::Storage,
         Self::Configuration,
         Self::Schema,
+        Self::Crypto,
+        Self::Rejected,
     ];
 
     /// A stable identifier for logs and reports.
@@ -55,6 +62,8 @@ impl Reason {
             Self::Storage => "raft.storage",
             Self::Configuration => "raft.configuration",
             Self::Schema => "raft.schema",
+            Self::Crypto => "raft.crypto",
+            Self::Rejected => "raft.rejected",
         }
     }
 
@@ -66,7 +75,12 @@ impl Reason {
     pub const fn worth_retrying(self) -> bool {
         match self {
             Self::NoQuorum | Self::Consensus => true,
-            Self::NotLeader | Self::Storage | Self::Configuration | Self::Schema => false,
+            Self::NotLeader
+            | Self::Storage
+            | Self::Configuration
+            | Self::Schema
+            | Self::Crypto
+            | Self::Rejected => false,
         }
     }
 }

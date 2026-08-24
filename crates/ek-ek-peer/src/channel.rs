@@ -27,6 +27,7 @@
 //! runtime is for. The TLS is the same OpenSSL the rest of the tree speaks,
 //! so no second TLS stack enters the tree (ADR-0068).
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,8 +45,8 @@ use tokio_openssl::SslStream;
 use crate::authority::identity_of;
 use crate::error::{Failure, Reason, crypto};
 use crate::message::{
-    Answer, Ask, Call, HealthAnswer, HealthAsk, Hello, HelloAnswer, NO_HELLO, NO_SERVICE, PROTOCOL,
-    Refusal, Reply, UNREADABLE, WRONG_PROTOCOL, WRONG_SCHEMA,
+    Answer, Ask, Call, HealthAnswer, HealthAsk, Hello, HelloAnswer, NO_HELLO, NO_SERVICE, NOT_OPEN,
+    PROTOCOL, REMOVED, Refusal, Reply, UNREADABLE, WRONG_PROTOCOL, WRONG_SCHEMA,
 };
 use crate::wire::{MOST_LINE_BYTES, decode, encode};
 
@@ -62,6 +63,14 @@ pub const DEFAULT_PORT: u16 = 7373;
 /// product runs on. Without it a peer that connects and then says nothing
 /// holds the socket for as long as it likes.
 pub const PATIENCE: Duration = Duration::from_secs(10);
+
+/// The name a caller with nothing to verify against puts in the handshake.
+///
+/// Something has to go there: an empty one is not a name and OpenSSL refuses
+/// it. Nothing reads this, because the only caller in that state has no
+/// authority to check a name against and does its checking after the exchange
+/// instead (ADR-0084).
+const UNNAMED: &str = "cluster";
 
 /// What one node needs to speak to its peers.
 ///
@@ -90,6 +99,11 @@ impl std::fmt::Debug for Credentials {
 ///
 /// The body is opaque here. A service defines what it takes and what it
 /// returns; this crate only carries it and says who called (ADR-0083).
+///
+/// `from` is `None` when the caller presented no certificate. Only a service
+/// the listener was told to open can be reached that way, and a service that
+/// takes callers both ways has to decide what an unnamed one may do
+/// (ADR-0084).
 pub trait Service: Send + Sync + 'static {
     /// Answers one call.
     ///
@@ -98,7 +112,7 @@ pub trait Service: Send + Sync + 'static {
     /// Returns a failure the caller receives as a refusal, naming the reason.
     fn call(
         &self,
-        from: &NodeId,
+        from: Option<&NodeId>,
         service: &str,
         body: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, Failure>> + Send + '_>>;
@@ -114,7 +128,7 @@ pub struct NoServices;
 impl Service for NoServices {
     fn call(
         &self,
-        _from: &NodeId,
+        _from: Option<&NodeId>,
         service: &str,
         _body: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, Failure>> + Send + '_>> {
@@ -128,20 +142,103 @@ impl Service for NoServices {
     }
 }
 
+/// Whoever decides that a caller is no longer welcome.
+///
+/// A removed node's certificate stays valid until it runs out and nothing
+/// revokes it, so the only thing that stops it is this question, asked on every
+/// connection (R-32, ADR-0084).
+pub trait Gate: Send + Sync + 'static {
+    /// Whether this caller is refused before it says anything.
+    fn refuses(&self, caller: &NodeId) -> bool;
+}
+
+/// A gate that turns nobody away.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoGate;
+
+impl Gate for NoGate {
+    fn refuses(&self, _caller: &NodeId) -> bool {
+        false
+    }
+}
+
+/// What a listener is told before it binds.
+///
+/// A structure rather than five parameters, because two of them decide who may
+/// speak at all and a positional argument is a poor place for that.
+#[derive(Clone)]
+pub struct Listening {
+    /// Which node is answering.
+    pub node: NodeId,
+    /// The config schema this node reads.
+    pub schema_version: u32,
+    /// The services a caller with no certificate may reach, by name.
+    ///
+    /// Empty is the ordinary case, and it is what keeps the listener demanding
+    /// a certificate from everybody. One name in it is what lets a node with no
+    /// certificate yet ask to join, and nothing else (ADR-0084).
+    pub open: BTreeSet<String>,
+    /// Who is turned away before saying anything.
+    pub gate: Arc<dyn Gate>,
+    /// What answers the calls.
+    pub service: Arc<dyn Service>,
+}
+
+impl Listening {
+    /// The ordinary case: every caller presents a certificate, nobody is
+    /// turned away by name.
+    #[must_use]
+    pub fn new(node: &NodeId, schema_version: u32, service: Arc<dyn Service>) -> Self {
+        Self {
+            node: node.clone(),
+            schema_version,
+            open: BTreeSet::new(),
+            gate: Arc::new(NoGate),
+            service,
+        }
+    }
+
+    /// Opens one service to a caller with no certificate.
+    #[must_use]
+    pub fn opening(mut self, service: &str) -> Self {
+        self.open.insert(service.to_owned());
+        self
+    }
+
+    /// Puts a gate in front of the whole listener.
+    #[must_use]
+    pub fn behind(mut self, gate: Arc<dyn Gate>) -> Self {
+        self.gate = gate;
+        self
+    }
+}
+
+impl std::fmt::Debug for Listening {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Listening")
+            .field("node", &self.node)
+            .field("schema_version", &self.schema_version)
+            .field("open", &self.open)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A node that answers its peers.
 pub struct Listener {
     socket: TcpListener,
     acceptor: SslAcceptor,
-    node: NodeId,
-    schema_version: u32,
-    service: Arc<dyn Service>,
+    settings: Listening,
 }
 
 /// One connection that was served.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Served {
     /// Which node called, read out of the certificate it presented.
-    pub caller: NodeId,
+    ///
+    /// `None` when it presented none, which only happens on a listener that
+    /// opens a service to such a caller.
+    pub caller: Option<NodeId>,
     /// How many calls it made before it went away.
     pub calls: usize,
 }
@@ -155,10 +252,8 @@ impl Listener {
     /// [`Reason::Crypto`] when the credentials do not build an acceptor.
     pub async fn bind(
         address: impl ToSocketAddrs,
-        node: &NodeId,
-        schema_version: u32,
         credentials: &Credentials,
-        service: Arc<dyn Service>,
+        settings: Listening,
     ) -> Result<Self, Failure> {
         let socket = TcpListener::bind(address).await.map_err(|error| {
             Failure::new(
@@ -169,10 +264,8 @@ impl Listener {
 
         Ok(Self {
             socket,
-            acceptor: acceptor(credentials)?,
-            node: node.clone(),
-            schema_version,
-            service,
+            acceptor: acceptor(credentials, settings.open.is_empty())?,
+            settings,
         })
     }
 
@@ -210,8 +303,37 @@ impl Listener {
 
         let mut stream = accept(&self.acceptor, stream, from).await?;
         let caller = caller_of(&stream)?;
-        let calls = self.converse(&mut stream, &caller).await?;
+        self.admit(&mut stream, caller.as_ref()).await?;
+        let calls = self.converse(&mut stream, caller.as_ref()).await?;
         Ok(Served { caller, calls })
+    }
+
+    /// Turns a removed caller away before it says anything.
+    ///
+    /// The refusal is written out rather than the socket simply dropped, so the
+    /// node on the other side learns it was removed instead of reading a
+    /// network fault and retrying forever.
+    async fn admit(
+        &self,
+        stream: &mut SslStream<TcpStream>,
+        caller: Option<&NodeId>,
+    ) -> Result<(), Failure> {
+        let Some(caller) = caller else {
+            return Ok(());
+        };
+        if !self.settings.gate.refuses(caller) {
+            return Ok(());
+        }
+
+        let refused = refusal(
+            REMOVED,
+            &format!("{} was removed from this cluster", caller.as_str()),
+        );
+        write_line(stream, &refused).await?;
+        Err(Failure::new(
+            Reason::Rejected,
+            format!("{} was removed from this cluster", caller.as_str()),
+        ))
     }
 
     /// Answers peers until the future is dropped.
@@ -231,8 +353,13 @@ impl Listener {
                 match accept(&held.acceptor, stream, from).await {
                     Ok(mut stream) => match caller_of(&stream) {
                         Ok(caller) => {
-                            if let Err(failure) = held.converse(&mut stream, &caller).await {
-                                log::debug!("peer {} left: {failure}", caller.as_str());
+                            let named = named(caller.as_ref());
+                            if let Err(failure) = held.admit(&mut stream, caller.as_ref()).await {
+                                log::warn!("a peer at {from} was refused: {failure}");
+                            } else if let Err(failure) =
+                                held.converse(&mut stream, caller.as_ref()).await
+                            {
+                                log::debug!("peer {named} left: {failure}");
                             }
                         }
                         Err(failure) => log::warn!("a peer at {from} was refused: {failure}"),
@@ -247,7 +374,7 @@ impl Listener {
     async fn converse(
         &self,
         stream: &mut SslStream<TcpStream>,
-        caller: &NodeId,
+        caller: Option<&NodeId>,
     ) -> Result<usize, Failure> {
         let mut reader = BufReader::new(stream);
         let mut greeted = false;
@@ -280,11 +407,24 @@ impl Listener {
                 }
                 Ok(Ask::Health(_)) => Answer::Health(HealthAnswer {
                     protocol: PROTOCOL.to_owned(),
-                    node: self.node.as_str().to_owned(),
+                    node: self.settings.node.as_str().to_owned(),
                 }),
+                // A caller with no certificate reaches the named services and
+                // nothing else. Checked here rather than left to each service,
+                // so a service added later cannot forget it (ADR-0084).
+                Ok(Ask::Call(Call { service, .. }))
+                    if caller.is_none() && !self.settings.open.contains(&service) =>
+                {
+                    let refused = refusal(
+                        NOT_OPEN,
+                        &format!("{service} is not open to a caller with no certificate"),
+                    );
+                    write_line(&mut reader, &refused).await?;
+                    return Ok(calls);
+                }
                 Ok(Ask::Call(Call { service, body })) => {
                     calls += 1;
-                    match self.service.call(caller, &service, body).await {
+                    match self.settings.service.call(caller, &service, body).await {
                         Ok(body) => Answer::Reply(Reply { body }),
                         Err(failure) => refusal(NO_SERVICE, failure.detail()),
                     }
@@ -310,27 +450,40 @@ impl Listener {
         // read what the cluster holds must stop before it takes a single log
         // record, so the fault is one connection and not a half joined node
         // (ADR-0019, ADR-0083).
-        if hello.schema_version != self.schema_version {
+        if hello.schema_version != self.settings.schema_version {
             return Err(refusal(
                 WRONG_SCHEMA,
                 &format!(
                     "this node reads config schema {} and the caller reads {}",
-                    self.schema_version, hello.schema_version
+                    self.settings.schema_version, hello.schema_version
                 ),
             ));
         }
         Ok(Answer::Hello(HelloAnswer {
             protocol: PROTOCOL.to_owned(),
-            schema_version: self.schema_version,
-            node: self.node.as_str().to_owned(),
+            schema_version: self.settings.schema_version,
+            node: self.settings.node.as_str().to_owned(),
         }))
     }
 }
 
 /// An open connection to one peer.
+///
+/// Its `Debug` prints the name and nothing else. What is behind it is a socket
+/// and key material, and neither belongs in a log line.
 pub struct Peer {
     stream: BufReader<SslStream<TcpStream>>,
     node: NodeId,
+    served: Option<X509>,
+}
+
+impl std::fmt::Debug for Peer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Peer")
+            .field("node", &self.node)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Peer {
@@ -352,6 +505,36 @@ impl Peer {
         schema_version: u32,
         credentials: &Credentials,
     ) -> Result<Self, Failure> {
+        Self::dial_with(address, Some(expect), schema_version, Some(credentials)).await
+    }
+
+    /// Dials with no certificate of its own and nothing to check the far end
+    /// against.
+    ///
+    /// What a node with no identity yet has to do to ask for one. Nothing here
+    /// is authenticated in either direction: the caller has no certificate to
+    /// present, and the fingerprint it holds cannot be checked against a leaf
+    /// certificate alone. The join exchange carries the authority back and the
+    /// caller checks it there, which is where the fingerprint in the token
+    /// finally means something (ADR-0031, ADR-0084).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reason::Network`] when the peer cannot be reached and
+    /// [`Reason::Protocol`] when it answers something this release cannot read.
+    pub async fn dial_unproven(
+        address: impl ToSocketAddrs,
+        schema_version: u32,
+    ) -> Result<Self, Failure> {
+        Self::dial_with(address, None, schema_version, None).await
+    }
+
+    async fn dial_with(
+        address: impl ToSocketAddrs,
+        expect: Option<&NodeId>,
+        schema_version: u32,
+        credentials: Option<&Credentials>,
+    ) -> Result<Self, Failure> {
         let socket = TcpStream::connect(address).await.map_err(|error| {
             Failure::new(
                 Reason::Network,
@@ -360,11 +543,17 @@ impl Peer {
         })?;
 
         let connector = connector(credentials)?;
-        let configuration = connector
+        let mut configuration = connector
             .configure()
             .map_err(crypto("the peer connection could not be configured"))?;
+        if credentials.is_none() {
+            // There is no authority to check the name against, so checking the
+            // name would be theatre. The join exchange does the checking.
+            configuration.set_verify_hostname(false);
+            configuration.set_verify(SslVerifyMode::NONE);
+        }
         let ssl = configuration
-            .into_ssl(expect.as_str())
+            .into_ssl(expect.map_or(UNNAMED, NodeId::as_str))
             .map_err(crypto("the peer name could not be set"))?;
         let mut stream = SslStream::new(ssl, socket)
             .map_err(crypto("the peer connection could not be built"))?;
@@ -373,14 +562,32 @@ impl Peer {
                 Reason::Rejected,
                 format!(
                     "{} did not prove it is who it claims: {error}",
-                    expect.as_str()
+                    expect.map_or("the peer", NodeId::as_str)
                 ),
             )
         })?;
 
+        let served = stream.ssl().peer_certificate();
+        // With credentials this name was proved by the handshake. Without them
+        // it was not, and the caller has to check the authority before it
+        // believes anything.
+        let node = match expect {
+            Some(expect) => expect.clone(),
+            None => {
+                let certificate = served.as_ref().ok_or_else(|| {
+                    Failure::new(
+                        Reason::Protocol,
+                        "the peer presented no certificate at all".to_owned(),
+                    )
+                })?;
+                identity_of(certificate)?
+            }
+        };
+
         let mut peer = Self {
             stream: BufReader::new(stream),
-            node: expect.clone(),
+            node,
+            served,
         };
 
         let greeting = peer
@@ -394,12 +601,12 @@ impl Peer {
                 // The name in the message and the name in the certificate have
                 // to agree. Only the second one was signed by anything, so a
                 // disagreement means the message is not to be trusted.
-                if answer.node != expect.as_str() {
+                if answer.node != peer.node.as_str() {
                     return Err(Failure::new(
                         Reason::Protocol,
                         format!(
                             "the certificate says {} and the answer says {}",
-                            expect.as_str(),
+                            peer.node.as_str(),
                             answer.node
                         ),
                     ));
@@ -421,6 +628,14 @@ impl Peer {
     #[must_use]
     pub const fn node(&self) -> &NodeId {
         &self.node
+    }
+
+    /// The certificate the far end served, when it served one.
+    ///
+    /// What a joining node checks against the authority the join hands back.
+    #[must_use]
+    pub const fn served(&self) -> Option<&X509> {
+        self.served.as_ref()
     }
 
     /// Asks whether the peer is there.
@@ -575,7 +790,7 @@ fn own_material(credentials: &Credentials) -> Result<(X509, PKey<Private>), Fail
 /// certificate a refusal. `PEER` alone asks for one and accepts the connection
 /// when none arrives, which is the setting that makes mutual TLS look
 /// configured and be optional.
-fn acceptor(credentials: &Credentials) -> Result<SslAcceptor, Failure> {
+fn acceptor(credentials: &Credentials, demand: bool) -> Result<SslAcceptor, Failure> {
     let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
         .map_err(crypto("no acceptor could be built"))?;
     // Every peer is this same product. There is no old client to keep, so
@@ -584,7 +799,15 @@ fn acceptor(credentials: &Credentials) -> Result<SslAcceptor, Failure> {
         .set_min_proto_version(Some(SslVersion::TLS1_3))
         .map_err(crypto("the version floor could not be set"))?;
     builder.set_cert_store(trust(&credentials.authority_pem)?);
-    builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    // `PEER` alone still verifies whatever arrives against the cluster
+    // authority. What it stops doing is insisting that something arrives, and
+    // that is only ever the case on a node offering a service to a caller with
+    // no certificate yet.
+    builder.set_verify(if demand {
+        SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT
+    } else {
+        SslVerifyMode::PEER
+    });
 
     let (certificate, key) = own_material(credentials)?;
     builder
@@ -601,12 +824,22 @@ fn acceptor(credentials: &Credentials) -> Result<SslAcceptor, Failure> {
 }
 
 /// The client side.
-fn connector(credentials: &Credentials) -> Result<SslConnector, Failure> {
+///
+/// With no credentials it presents nothing and checks nothing: the only caller
+/// in that state is a node asking to join, which holds a fingerprint rather
+/// than the authority itself and checks it after the exchange (ADR-0084).
+fn connector(credentials: Option<&Credentials>) -> Result<SslConnector, Failure> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())
         .map_err(crypto("no connector could be built"))?;
     builder
         .set_min_proto_version(Some(SslVersion::TLS1_3))
         .map_err(crypto("the version floor could not be set"))?;
+
+    let Some(credentials) = credentials else {
+        builder.set_verify(SslVerifyMode::NONE);
+        return Ok(builder.build());
+    };
+
     builder.set_cert_store(trust(&credentials.authority_pem)?);
     builder.set_verify(SslVerifyMode::PEER);
 
@@ -625,14 +858,18 @@ fn connector(credentials: &Credentials) -> Result<SslConnector, Failure> {
 }
 
 /// Who is on the other end, read out of the certificate they presented.
-fn caller_of(stream: &SslStream<TcpStream>) -> Result<NodeId, Failure> {
-    let certificate = stream.ssl().peer_certificate().ok_or_else(|| {
-        Failure::new(
-            Reason::Rejected,
-            "a peer completed a handshake without presenting a certificate".to_owned(),
-        )
-    })?;
-    identity_of(&certificate)
+/// Nothing when the caller presented none, which the handshake only allows on
+/// a listener that opens a service to such a caller.
+fn caller_of(stream: &SslStream<TcpStream>) -> Result<Option<NodeId>, Failure> {
+    let Some(certificate) = stream.ssl().peer_certificate() else {
+        return Ok(None);
+    };
+    identity_of(&certificate).map(Some)
+}
+
+/// What to call a caller in a log line when it has no name.
+fn named(caller: Option<&NodeId>) -> &str {
+    caller.map_or("an unnamed caller", NodeId::as_str)
 }
 
 /// Reads one line, or nothing when the peer went away.

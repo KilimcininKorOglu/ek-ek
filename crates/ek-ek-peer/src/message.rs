@@ -148,3 +148,17 @@ pub const NO_HELLO: &str = "peer.no_hello";
 
 /// The reason key for a call addressed to a service this node does not run.
 pub const NO_SERVICE: &str = "peer.no_service";
+
+/// The reason key for a caller with no certificate reaching past the services
+/// this node opens to one.
+///
+/// Told apart from [`NO_SERVICE`] on purpose. A caller that joins and then
+/// calls the same name again has to be able to see that the second refusal was
+/// about the service and the first was about the certificate (ADR-0084).
+pub const NOT_OPEN: &str = "peer.not_open";
+
+/// The reason key for a caller this cluster has removed.
+///
+/// Its certificate is still valid, and nothing revokes it. This is what stops
+/// it all the same (R-32, ADR-0084).
+pub const REMOVED: &str = "peer.removed";

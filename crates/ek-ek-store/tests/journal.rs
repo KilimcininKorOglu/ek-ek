@@ -252,6 +252,7 @@ fn an_applied_write_moves_the_config_and_the_marker_together() {
             &change("replicated"),
             1_700_000_000,
             &[(marker::APPLIED, "{\"index\":4}")],
+            &[],
         )
         .expect("the record applies");
 
@@ -356,6 +357,34 @@ fn an_imported_state_replaces_what_the_node_held_rather_than_joining_it() {
         ours.marker(marker::APPLIED).expect("readable").as_deref(),
         Some("{\"index\":9}"),
         "the state landed without the position that says where it came from"
+    );
+}
+
+#[test]
+fn an_imported_state_that_carries_nothing_leaves_the_node_holding_nothing() {
+    // A state with no snapshot is a cluster that has written nothing. A node
+    // that kept its old config after receiving one would hold a document with
+    // no version history behind it, and a rollback would have nowhere to go.
+    let here = data_directory();
+    let there = data_directory();
+    let from = store(&here);
+    let to = store(&there);
+
+    to.write(&snapshot(2), &change("what this node held"))
+        .expect("written");
+    assert!(to.read().expect("readable").is_some());
+
+    let empty = from.export().expect("exported");
+    assert!(empty.snapshot.is_none(), "the sending node holds a state");
+    to.import(&empty, &[]).expect("imported");
+
+    assert!(
+        to.read().expect("readable").is_none(),
+        "the node kept a config the cluster does not hold"
+    );
+    assert!(
+        to.versions().expect("readable").is_empty(),
+        "the node kept a version history the cluster does not hold"
     );
 }
 

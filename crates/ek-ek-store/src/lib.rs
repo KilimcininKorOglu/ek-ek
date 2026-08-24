@@ -59,6 +59,7 @@ pub mod diff;
 pub mod error;
 pub mod journal;
 pub mod master_key;
+pub mod membership;
 pub mod migration;
 pub mod secret;
 pub mod sqlite;
@@ -71,6 +72,7 @@ pub use diff::{ConfigDiff, DiffEntry, ObjectChange, ObjectKind, diff};
 pub use error::{Error, ErrorKind, Result};
 pub use journal::{AuditRecord, FullState, Journal, Record, StoredVersion, marker};
 pub use master_key::{KEY_LENGTH, KEY_MODE, MASTER_KEY_FILE, MasterKey};
+pub use membership::{JoinRecord, Removed, TokenId};
 pub use migration::{
     MIGRATIONS, Migration, document_version, migrate_document, migrate_into_config, target_version,
 };

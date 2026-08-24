@@ -192,7 +192,7 @@ impl RaftService {
 impl Service for RaftService {
     fn call(
         &self,
-        _from: &ek_ek_config::NodeId,
+        _from: Option<&ek_ek_config::NodeId>,
         service: &str,
         body: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<serde_json::Value, Failure>> + Send + '_>>

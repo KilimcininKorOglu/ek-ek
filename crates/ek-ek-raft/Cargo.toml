@@ -22,6 +22,9 @@ serde = { workspace = true }
 # The number consensus calls a node is derived from its name; the config
 # derives a virtual router id from a name the same way.
 sha2 = { workspace = true }
+# The secret half of a join token. The same source the store already draws
+# nonces and master keys from, so the tree keeps one.
+getrandom = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }

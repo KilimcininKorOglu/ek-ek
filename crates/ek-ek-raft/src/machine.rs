@@ -23,7 +23,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use ek_ek_store::journal::marker;
-use ek_ek_store::{Change, FullState, Journal, Snapshot as StoredSnapshot, SqliteStore, Store};
+use ek_ek_store::{
+    AuditRecord, Change, FullState, Journal, Snapshot as StoredSnapshot, SqliteStore, Store,
+};
 use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 use openraft::{
     Entry, EntryPayload, LogId, Snapshot, SnapshotMeta, StorageError, StoredMembership,
@@ -193,9 +195,12 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                         .map(|(name, value)| (name.as_str(), value.as_str()))
                         .collect();
 
+                    let audit: Vec<AuditRecord> =
+                        request.audit.iter().map(AuditRecord::from).collect();
+
                     let version = self
                         .store
-                        .apply_write(&state, &change, request.now_unix, &borrowed)
+                        .apply_write(&state, &change, request.now_unix, &borrowed, &audit)
                         .map_err(|error| fault::apply(log_id, &error))?;
                     answers.push(WriteResponse {
                         version: version.get(),

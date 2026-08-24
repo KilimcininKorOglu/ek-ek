@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use ek_ek_config::NodeId;
 use ek_ek_peer::Credentials;
-use ek_ek_store::{Change, Snapshot as StoredSnapshot, SqliteStore, Store, VersionId};
+use ek_ek_store::{AuditRecord, Change, Snapshot as StoredSnapshot, SqliteStore, Store, VersionId};
 use openraft::error::{CheckIsLeaderError, ClientWriteError, ForwardToLeader, RaftError};
 use openraft::{Config as RaftConfig, Raft};
 
@@ -34,7 +34,9 @@ use crate::identity;
 use crate::log::LogStore;
 use crate::machine::StateMachine;
 use crate::network::Dialler;
-use crate::types::{NodeNumber, PeerNode, TypeConfig, WireChange, WireSnapshot, WriteRequest};
+use crate::types::{
+    NodeNumber, PeerNode, TypeConfig, WireAudit, WireChange, WireSnapshot, WriteRequest,
+};
 
 /// How long a node waits before it decides the leader is gone.
 ///
@@ -255,6 +257,72 @@ impl Cluster {
             })
     }
 
+    /// Drops a node from the cluster.
+    ///
+    /// The learner is dropped as well as the vote, so the node stops receiving
+    /// records at all. It keeps whatever it already had, which is what makes
+    /// the refusal list matter: nothing here takes its certificate away
+    /// (ADR-0084).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reason::Consensus`] when the change cannot be made,
+    /// [`Reason::NotLeader`] when this node is not the leader, and
+    /// [`Reason::Configuration`] when the node is the only voter left.
+    pub async fn remove_voter(&self, node: &NodeId) -> Result<(), Failure> {
+        let number = identity::of(node);
+        let mut members: BTreeSet<u64> = self
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect();
+
+        if !members.remove(&number) {
+            // Already gone. Said rather than treated as success, because an
+            // operator removing a name that is not there has the wrong name.
+            return Err(Failure::new(
+                Reason::Configuration,
+                format!("{} is not a voter in this cluster", node.as_str()),
+            ));
+        }
+        if members.is_empty() {
+            return Err(Failure::new(
+                Reason::Configuration,
+                format!(
+                    "{} is the only voter left, and a cluster with none cannot elect anything",
+                    node.as_str()
+                ),
+            ));
+        }
+
+        self.raft
+            .change_membership(members, true)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                Failure::new(
+                    Reason::Consensus,
+                    format!("{} could not be removed: {error}", node.as_str()),
+                )
+            })
+    }
+
+    /// Which nodes vote, by the name each was added under.
+    #[must_use]
+    pub fn voters(&self) -> BTreeSet<NodeId> {
+        let metrics = self.raft.metrics();
+        let borrowed = metrics.borrow();
+        let membership = borrowed.membership_config.membership();
+        membership
+            .voter_ids()
+            .filter_map(|number| membership.get_node(&number))
+            .map(PeerNode::node)
+            .collect()
+    }
+
     /// Replaces the stored state, through consensus.
     ///
     /// Leadership is confirmed with a quorum before anything is proposed, so a
@@ -273,6 +341,25 @@ impl Cluster {
         state: &StoredSnapshot,
         change: &Change,
         now_unix: i64,
+    ) -> Result<VersionId, Failure> {
+        self.write_audited(state, change, now_unix, &[]).await
+    }
+
+    /// Replaces the stored state and writes audit rows in the same transaction.
+    ///
+    /// One entry, one transaction. A change that landed and an audit row that
+    /// did not would be a change nobody can account for, which is the one thing
+    /// the audit log exists to make impossible (ADR-0008, ADR-0084).
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Cluster::write`].
+    pub async fn write_audited(
+        &self,
+        state: &StoredSnapshot,
+        change: &Change,
+        now_unix: i64,
+        audit: &[AuditRecord],
     ) -> Result<VersionId, Failure> {
         // A heartbeat round to a quorum, which fails rather than waits. Asked
         // first so that a node with no quorum proposes nothing at all.
@@ -296,6 +383,7 @@ impl Cluster {
             state: WireSnapshot::from(state),
             change: WireChange::from(change),
             now_unix,
+            audit: audit.iter().map(WireAudit::from).collect(),
         };
 
         // Bounded even so. The check above can succeed and the quorum can go
@@ -392,6 +480,20 @@ impl Cluster {
     ///
     /// Returns [`Reason::Consensus`] when the shutdown does not complete.
     pub async fn stop(self) -> Result<(), Failure> {
+        self.halt().await
+    }
+
+    /// Stops this node's Raft without taking the cluster with it.
+    ///
+    /// What a node that shares its cluster with a service and a gate has to
+    /// call: those hold it too, so nothing can take sole ownership of it to
+    /// stop it (ADR-0084). Everything the cluster holds afterwards is a store
+    /// that still reads and a Raft that answers nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reason::Consensus`] when the shutdown does not complete.
+    pub async fn halt(&self) -> Result<(), Failure> {
         self.raft.shutdown().await.map_err(|error| {
             Failure::new(
                 Reason::Consensus,
