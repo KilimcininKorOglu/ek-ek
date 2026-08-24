@@ -20,11 +20,19 @@ use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ek_ek_config::{Config, NodeId};
 use ek_ek_peer::{Authority, Credentials, Issued};
 use ek_ek_store::{Change, Secret, Snapshot, SqliteStore, Store};
+
+/// The config schema this release reads.
+///
+/// Told to every peer in the opening line, so a node running another release
+/// is refused at the door rather than after it has taken a log record
+/// (ADR-0019, ADR-0083).
+const SCHEMA_VERSION: u32 = ek_ek_config::SchemaVersion::CURRENT.get();
 
 /// Permissions a written private key carries.
 const KEY_MODE: u32 = 0o600;
@@ -227,41 +235,60 @@ pub fn serve(arguments: &ServeArguments<'_>) -> ExitCode {
         Err(said) => return refused(&said),
     };
 
-    let node = NodeId::new(arguments.node);
-    let listener = match ek_ek_peer::Listener::bind(arguments.listen, &node, &credentials) {
-        Ok(listener) => listener,
-        Err(failure) => return refused(&format!("the peer port could not be opened: {failure}")),
+    let Some(runtime) = runtime() else {
+        return refused("the async runtime could not be started");
     };
 
-    match listener.address() {
-        Ok(address) => say(&format!(
-            r#"{{"kind":"cluster","ts":{},"event":"listening","address":"{address}"}}"#,
-            now()
-        )),
-        Err(failure) => {
-            return refused(&format!("the peer port could not be read back: {failure}"));
-        }
-    }
+    runtime.block_on(async {
+        let node = NodeId::new(arguments.node);
+        // No services. This command proves who the node is and answers a
+        // health question; the Raft services arrive with the node the cluster
+        // runs, not with a diagnostic command (ADR-0083).
+        let listener = match ek_ek_peer::Listener::bind(
+            arguments.listen,
+            &node,
+            SCHEMA_VERSION,
+            &credentials,
+            Arc::new(ek_ek_peer::NoServices),
+        )
+        .await
+        {
+            Ok(listener) => listener,
+            Err(failure) => {
+                return refused(&format!("the peer port could not be opened: {failure}"));
+            }
+        };
 
-    for _ in 0..arguments.connections {
-        match listener.serve_one() {
-            Ok(served) => say(&format!(
-                r#"{{"kind":"cluster","ts":{},"event":"served","caller":"{}"}}"#,
-                now(),
-                escape(served.caller.as_str())
+        match listener.address() {
+            Ok(address) => say(&format!(
+                r#"{{"kind":"cluster","ts":{},"event":"listening","address":"{address}"}}"#,
+                now()
             )),
-            // Said rather than swallowed. A refused peer is the most
-            // interesting thing this command ever sees.
-            Err(failure) => say(&format!(
-                r#"{{"kind":"cluster","ts":{},"event":"refused","reason":"{}","detail":"{}"}}"#,
-                now(),
-                failure.reason().key(),
-                escape(failure.detail())
-            )),
+            Err(failure) => {
+                return refused(&format!("the peer port could not be read back: {failure}"));
+            }
         }
-    }
 
-    ExitCode::SUCCESS
+        for _ in 0..arguments.connections {
+            match listener.serve_one().await {
+                Ok(served) => say(&format!(
+                    r#"{{"kind":"cluster","ts":{},"event":"served","caller":"{}"}}"#,
+                    now(),
+                    escape(served.caller.as_str())
+                )),
+                // Said rather than swallowed. A refused peer is the most
+                // interesting thing this command ever sees.
+                Err(failure) => say(&format!(
+                    r#"{{"kind":"cluster","ts":{},"event":"refused","reason":"{}","detail":"{}"}}"#,
+                    now(),
+                    failure.reason().key(),
+                    escape(failure.detail())
+                )),
+            }
+        }
+
+        ExitCode::SUCCESS
+    })
 }
 
 /// Asks one peer whether it is there.
@@ -271,19 +298,36 @@ pub fn ping(arguments: &PingArguments<'_>) -> ExitCode {
         Err(said) => return refused(&said),
     };
 
-    let expect = NodeId::new(arguments.expect);
-    match ek_ek_peer::ask_health(arguments.to, &expect, &credentials) {
-        Ok(answer) => {
-            say(&format!(
-                r#"{{"kind":"cluster","ts":{},"event":"answered","node":"{}","protocol":"{}"}}"#,
-                now(),
-                escape(&answer.node),
-                escape(&answer.protocol)
-            ));
-            ExitCode::SUCCESS
+    let Some(runtime) = runtime() else {
+        return refused("the async runtime could not be started");
+    };
+
+    runtime.block_on(async {
+        let expect = NodeId::new(arguments.expect);
+        match ek_ek_peer::ask_health(arguments.to, &expect, SCHEMA_VERSION, &credentials).await {
+            Ok(answer) => {
+                say(&format!(
+                    r#"{{"kind":"cluster","ts":{},"event":"answered","node":"{}","protocol":"{}"}}"#,
+                    now(),
+                    escape(&answer.node),
+                    escape(&answer.protocol)
+                ));
+                ExitCode::SUCCESS
+            }
+            Err(failure) => refused(&format!("{failure}")),
         }
-        Err(failure) => refused(&format!("{failure}")),
-    }
+    })
+}
+
+/// A runtime for the two commands that open a socket.
+///
+/// Built here rather than around `main`, so the commands that read a file and
+/// write a certificate do not start a runtime they never use.
+fn runtime() -> Option<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()
 }
 
 /// How long the certificate on disk has left, when it is not due yet.

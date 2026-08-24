@@ -42,11 +42,14 @@ pub use authority::{
     AUTHORITY_COMMON_NAME, AUTHORITY_LIFETIME_DAYS, Authority, CLOCK_SKEW_ALLOWANCE_SECONDS,
     Issued, NODE_LIFETIME_DAYS, authority_certificate, authority_key, create, identity_of, issue,
 };
-pub use channel::{Credentials, DEFAULT_PORT, Listener, PATIENCE, Served, ask_health};
+pub use channel::{
+    Credentials, DEFAULT_PORT, Listener, NoServices, PATIENCE, Peer, Served, Service, ask_health,
+};
 pub use error::{Failure, Reason};
 pub use fingerprint::{FINGERPRINT_CHARACTERS, fingerprint, matches, well_formed};
 pub use message::{
-    Answer, Ask, HealthAnswer, HealthAsk, PROTOCOL, Refusal, UNREADABLE, WRONG_PROTOCOL,
+    Answer, Ask, Call, HealthAnswer, HealthAsk, Hello, HelloAnswer, NO_HELLO, NO_SERVICE, PROTOCOL,
+    Refusal, Reply, UNREADABLE, WRONG_PROTOCOL, WRONG_SCHEMA,
 };
 pub use record::{AUTHORITY_KEY_SECRET, authority_key_id, install, present, read};
 pub use renewal::{RENEW_AT, due, expired, remaining, unix_of, window_of, window_of_pem};

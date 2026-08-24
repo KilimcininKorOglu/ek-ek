@@ -23,6 +23,11 @@ openssl = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+# Raft rides this channel (ADR-0083): a leader replicates to every follower at
+# once, which is what an async runtime is for.
+tokio = { workspace = true }
+# Async TLS on the same openssl, so no second TLS stack enters the tree.
+tokio-openssl = { workspace = true }
 
 [dev-dependencies]
 # The measurements write a store to disk, to read back what really landed

@@ -17,51 +17,103 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::thread;
 
 use ek_ek_config::NodeId;
-use ek_ek_peer::{Credentials, Listener, PROTOCOL, Reason};
+use ek_ek_peer::{Credentials, Failure, Listener, NoServices, PROTOCOL, Reason, Served, Service};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
 
 mod common;
 
 use common::{DAY, authority, credentials, issue, issue_at, now};
 
+/// The config schema every node in these measurements reads.
+const SCHEMA: u32 = 1;
+
 /// A listener bound to a port the operating system chooses.
-fn listening(node: &str, credentials: &Credentials) -> (Listener, SocketAddr) {
-    let listener = Listener::bind("127.0.0.1:0", &NodeId::new(node), credentials)
-        .expect("the peer port opens");
+async fn listening(node: &str, credentials: &Credentials) -> (Listener, SocketAddr) {
+    listening_at(node, SCHEMA, credentials, Arc::new(NoServices)).await
+}
+
+/// The same, with the schema and the services named.
+async fn listening_at(
+    node: &str,
+    schema_version: u32,
+    credentials: &Credentials,
+    service: Arc<dyn Service>,
+) -> (Listener, SocketAddr) {
+    let listener = Listener::bind(
+        "127.0.0.1:0",
+        &NodeId::new(node),
+        schema_version,
+        credentials,
+        service,
+    )
+    .await
+    .expect("the peer port opens");
     let address = listener.address().expect("the port is readable");
     (listener, address)
 }
 
-#[test]
-fn two_nodes_of_the_same_cluster_reach_each_other() {
+/// Serves one peer in the background and hands back what it saw.
+fn answering(listener: Listener) -> tokio::task::JoinHandle<Result<Served, Failure>> {
+    tokio::spawn(async move { listener.serve_one().await })
+}
+
+/// A service that answers one name and refuses everything else.
+struct Echo;
+
+impl Service for Echo {
+    fn call(
+        &self,
+        from: &NodeId,
+        service: &str,
+        body: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, Failure>> + Send + '_>> {
+        let named = service.to_owned();
+        let caller = from.as_str().to_owned();
+        Box::pin(async move {
+            if named == "echo" {
+                Ok(serde_json::json!({ "from": caller, "body": body }))
+            } else {
+                Err(Failure::new(
+                    Reason::Protocol,
+                    format!("this node runs no {named} service"),
+                ))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn two_nodes_of_the_same_cluster_reach_each_other() {
     let authority = authority();
     let server = credentials(&authority, &issue(&authority, "node-1"));
     let client = credentials(&authority, &issue(&authority, "node-2"));
 
-    let (listener, address) = listening("node-1", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
 
-    let answer = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &client)
+    let answer = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &client)
+        .await
         .expect("a peer of the same cluster is served");
     assert_eq!(answer.node, "node-1");
     assert_eq!(answer.protocol, PROTOCOL);
 
-    let served = answering
-        .join()
-        .expect("the thread finishes")
-        .expect("served");
+    let served = served
+        .await
+        .expect("the task finishes")
+        .expect("the peer was served");
     // The caller is named by the certificate it presented and by nothing it
     // said. Anybody can claim a name in a message; only one of them was
     // signed by the authority.
     assert_eq!(served.caller, NodeId::new("node-2"));
-    assert!(served.asked.is_some());
 }
 
-#[test]
-fn a_caller_from_another_cluster_is_refused() {
+#[tokio::test]
+async fn a_caller_from_another_cluster_is_refused() {
     // The check that makes the authority mean anything. Without it any TLS
     // client at all could open a peer connection.
     let ours = authority();
@@ -69,35 +121,36 @@ fn a_caller_from_another_cluster_is_refused() {
     let server = credentials(&ours, &issue(&ours, "node-1"));
     let stranger = credentials(&ours, &issue(&theirs, "node-2"));
 
-    let (listener, address) = listening("node-1", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
 
-    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &stranger)
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &stranger)
+        .await
         .expect_err("a certificate from another authority is refused");
     assert!(
         matches!(failure.reason(), Reason::Rejected | Reason::Network),
         "the caller was let through: {failure}"
     );
     assert_eq!(
-        answering
-            .join()
-            .expect("the thread finishes")
+        served
+            .await
+            .expect("the task finishes")
             .expect_err("the listener refused it")
             .reason(),
         Reason::Rejected
     );
 }
 
-#[test]
-fn a_caller_with_no_certificate_is_refused() {
+#[tokio::test]
+async fn a_caller_with_no_certificate_is_refused() {
     // `SSL_VERIFY_PEER` on its own asks for a certificate and accepts the
     // connection when none arrives. That is the setting that makes mutual TLS
     // look configured and be optional, and this is what catches it.
     let authority = authority();
     let server = credentials(&authority, &issue(&authority, "node-1"));
 
-    let (listener, address) = listening("node-1", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
 
     let dialling = thread::spawn(move || {
         let mut builder =
@@ -115,7 +168,7 @@ fn a_caller_with_no_certificate_is_refused() {
             .map_err(|error| error.to_string())?;
         // Written and read back, because in TLS 1.3 a client learns it was
         // refused only when it tries to use the connection.
-        let _ = stream.write_all(b"{\"message\":\"health\",\"protocol\":\"x\"}\n");
+        let _ = stream.write_all(b"{\"message\":\"hello\",\"protocol\":\"x\"}\n");
         let mut back = Vec::new();
         stream
             .read_to_end(&mut back)
@@ -123,9 +176,9 @@ fn a_caller_with_no_certificate_is_refused() {
         Ok::<Vec<u8>, String>(back)
     });
 
-    let refusal = answering
-        .join()
-        .expect("the thread finishes")
+    let refusal = served
+        .await
+        .expect("the task finishes")
         .expect_err("a caller with no certificate is refused");
     assert_eq!(refusal.reason(), Reason::Rejected);
     // Refused by the handshake, not by a check afterwards. Asking for a
@@ -139,13 +192,13 @@ fn a_caller_with_no_certificate_is_refused() {
 
     let seen = dialling.join().expect("the thread finishes");
     assert!(
-        seen.as_ref().map_or(true, Vec::is_empty),
+        seen.as_ref().is_ok_and(Vec::is_empty) || seen.is_err(),
         "the listener answered a caller that presented nothing: {seen:?}"
     );
 }
 
-#[test]
-fn a_caller_with_an_expired_certificate_is_refused() {
+#[tokio::test]
+async fn a_caller_with_an_expired_certificate_is_refused() {
     let authority = authority();
     let server = credentials(&authority, &issue(&authority, "node-1"));
     // Signed long enough ago that its ninety days are gone.
@@ -154,27 +207,28 @@ fn a_caller_with_an_expired_certificate_is_refused() {
         &issue_at(&authority, "node-2", now() - 200 * DAY),
     );
 
-    let (listener, address) = listening("node-1", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
 
-    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &stale)
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &stale)
+        .await
         .expect_err("an expired certificate is refused");
     assert!(
         matches!(failure.reason(), Reason::Rejected | Reason::Network),
         "an expired caller was let through: {failure}"
     );
     assert_eq!(
-        answering
-            .join()
-            .expect("the thread finishes")
+        served
+            .await
+            .expect("the task finishes")
             .expect_err("the listener refused it")
             .reason(),
         Reason::Rejected
     );
 }
 
-#[test]
-fn a_node_answering_with_an_expired_certificate_is_refused() {
+#[tokio::test]
+async fn a_node_answering_with_an_expired_certificate_is_refused() {
     // The other direction. A caller has to check the peer as hard as the peer
     // checks the caller, or half the channel is authenticated.
     let authority = authority();
@@ -184,17 +238,18 @@ fn a_node_answering_with_an_expired_certificate_is_refused() {
     );
     let client = credentials(&authority, &issue(&authority, "node-2"));
 
-    let (listener, address) = listening("node-1", &stale);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &stale).await;
+    let served = answering(listener);
 
-    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &client)
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &client)
+        .await
         .expect_err("a peer with an expired certificate is refused");
     assert_eq!(failure.reason(), Reason::Rejected);
-    drop(answering.join());
+    served.abort();
 }
 
-#[test]
-fn a_node_answering_under_the_wrong_name_is_refused() {
+#[tokio::test]
+async fn a_node_answering_under_the_wrong_name_is_refused() {
     // What the caller checks: the identity, never the address. The listener
     // below is reachable and its certificate is valid, and it is still the
     // wrong node.
@@ -202,26 +257,28 @@ fn a_node_answering_under_the_wrong_name_is_refused() {
     let server = credentials(&authority, &issue(&authority, "node-3"));
     let client = credentials(&authority, &issue(&authority, "node-2"));
 
-    let (listener, address) = listening("node-3", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-3", &server).await;
+    let served = answering(listener);
 
-    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &client)
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &client)
+        .await
         .expect_err("a peer under another name is refused");
     assert_eq!(failure.reason(), Reason::Rejected);
-    drop(answering.join());
+    served.abort();
 
     // And the same listener answers the caller that asked for the right name,
     // so the refusal above is the name and not the listener.
-    let (listener, address) = listening("node-3", &server);
-    let answering = thread::spawn(move || listener.serve_one());
-    let answer = ek_ek_peer::ask_health(address, &NodeId::new("node-3"), &client)
+    let (listener, address) = listening("node-3", &server).await;
+    let served = answering(listener);
+    let answer = ek_ek_peer::ask_health(address, &NodeId::new("node-3"), SCHEMA, &client)
+        .await
         .expect("the node it really is answers");
     assert_eq!(answer.node, "node-3");
-    drop(answering.join());
+    served.abort();
 }
 
-#[test]
-fn a_message_this_release_cannot_read_is_refused_by_name() {
+#[tokio::test]
+async fn a_message_this_release_cannot_read_is_refused_by_name() {
     // An upgrade is rolling, so two releases speak to each other. A peer
     // running a newer one has to be able to tell "you do not know this
     // message" from "you are not there".
@@ -229,60 +286,155 @@ fn a_message_this_release_cannot_read_is_refused_by_name() {
     let server = credentials(&authority, &issue(&authority, "node-1"));
     let client = credentials(&authority, &issue(&authority, "node-2"));
 
-    let (listener, address) = listening("node-1", &server);
-    let answering = thread::spawn(move || listener.serve_one());
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
 
-    let connector = {
-        let mut builder =
-            SslConnector::builder(SslMethod::tls_client()).expect("a connector builds");
-        let certificate = openssl::x509::X509::from_pem(client.certificate_pem.as_bytes())
-            .expect("a certificate");
-        let key =
-            openssl::pkey::PKey::private_key_from_pem(client.key_pem.expose()).expect("a key");
-        let mut store = openssl::x509::store::X509StoreBuilder::new().expect("a store");
-        store
-            .add_cert(
-                openssl::x509::X509::from_pem(client.authority_pem.as_bytes())
-                    .expect("an authority"),
-            )
-            .expect("the authority is trusted");
-        builder.set_cert_store(store.build());
-        builder.set_certificate(&certificate).expect("accepted");
-        builder.set_private_key(&key).expect("accepted");
-        builder.build()
-    };
+    let seen = tokio::task::spawn_blocking(move || {
+        let mut stream = raw_client(address, &client, "node-1");
+        stream
+            .write_all(b"{\"message\":\"raft_append\"}\n")
+            .expect("the line is sent");
+        let mut back = String::new();
+        let mut reader = std::io::BufReader::new(&mut stream);
+        std::io::BufRead::read_line(&mut reader, &mut back).expect("an answer arrives");
+        back
+    })
+    .await
+    .expect("the client finishes");
 
-    let socket = TcpStream::connect(address).expect("the port answers");
-    let mut stream = connector
-        .configure()
-        .expect("configurable")
-        .connect("node-1", socket)
-        .expect("the handshake completes");
-    stream
-        .write_all(b"{\"message\":\"raft_append\"}\n")
-        .expect("the line is sent");
-
-    let mut back = String::new();
-    let mut reader = std::io::BufReader::new(&mut stream);
-    std::io::BufRead::read_line(&mut reader, &mut back).expect("an answer arrives");
     assert!(
-        back.contains(ek_ek_peer::UNREADABLE),
-        "the peer said nothing about what it could not read: {back}"
+        seen.contains(ek_ek_peer::UNREADABLE),
+        "the peer said nothing about what it could not read: {seen}"
     );
 
-    let served = answering
-        .join()
-        .expect("the thread finishes")
-        .expect("served");
+    let served = served
+        .await
+        .expect("the task finishes")
+        .expect("the peer was served");
     assert_eq!(served.caller, NodeId::new("node-2"));
-    assert!(
-        served.asked.is_none(),
-        "an unreadable line was taken for a message"
+    assert_eq!(
+        served.calls, 0,
+        "an unreadable line was taken for a call: {served:?}"
     );
 }
 
-#[test]
-fn the_channel_is_a_line_of_json_and_nothing_is_readable_off_the_wire() {
+#[tokio::test]
+async fn a_peer_that_reads_another_config_schema_is_refused_before_it_joins() {
+    // ADR-0019. A node that cannot read what the cluster holds has to stop at
+    // the door: one refused connection, not a half joined member that takes a
+    // log record and then cannot apply it.
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+    let client = credentials(&authority, &issue(&authority, "node-2"));
+
+    let (listener, address) = listening_at("node-1", 7, &server, Arc::new(NoServices)).await;
+    let served = answering(listener);
+
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), 9, &client)
+        .await
+        .expect_err("a node reading another schema is refused");
+    assert_eq!(failure.reason(), Reason::Rejected);
+    assert!(
+        failure.detail().contains(ek_ek_peer::WRONG_SCHEMA),
+        "the refusal does not name the reason: {failure}"
+    );
+    // Both schema numbers are in the message, so an operator reading it knows
+    // which node to upgrade without opening either one.
+    assert!(
+        failure.detail().contains('7') && failure.detail().contains('9'),
+        "the refusal does not say which schemas disagreed: {failure}"
+    );
+    served.abort();
+
+    // The same listener serves the node that reads what it reads, so the
+    // refusal above is the schema and not the listener.
+    let (listener, address) = listening_at("node-1", 7, &server, Arc::new(NoServices)).await;
+    let served = answering(listener);
+    let answer = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), 7, &client)
+        .await
+        .expect("a node reading the same schema is served");
+    assert_eq!(answer.node, "node-1");
+    served.abort();
+}
+
+#[tokio::test]
+async fn a_peer_that_speaks_before_it_says_hello_is_refused() {
+    // The greeting is where the protocol and the schema are checked. A peer
+    // that could skip it would replicate before either was compared.
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+    let client = credentials(&authority, &issue(&authority, "node-2"));
+
+    let (listener, address) = listening("node-1", &server).await;
+    let served = answering(listener);
+
+    let seen = tokio::task::spawn_blocking(move || {
+        let mut stream = raw_client(address, &client, "node-1");
+        stream
+            .write_all(b"{\"message\":\"call\",\"service\":\"echo\",\"body\":{}}\n")
+            .expect("the line is sent");
+        let mut back = String::new();
+        let mut reader = std::io::BufReader::new(&mut stream);
+        std::io::BufRead::read_line(&mut reader, &mut back).expect("an answer arrives");
+        back
+    })
+    .await
+    .expect("the client finishes");
+
+    assert!(
+        seen.contains(ek_ek_peer::NO_HELLO),
+        "a call was taken before the greeting: {seen}"
+    );
+    let served = served
+        .await
+        .expect("the task finishes")
+        .expect("the peer was served");
+    assert_eq!(served.calls, 0, "the call was counted: {served:?}");
+}
+
+#[tokio::test]
+async fn a_call_reaches_the_service_and_an_unknown_name_is_refused() {
+    // The transport Raft rides (ADR-0083). Both sides: a call the node runs
+    // reaches it and is counted, and one it does not run is refused by name.
+    let authority = authority();
+    let server = credentials(&authority, &issue(&authority, "node-1"));
+    let client = credentials(&authority, &issue(&authority, "node-2"));
+
+    let (listener, address) = listening_at("node-1", SCHEMA, &server, Arc::new(Echo)).await;
+    let served = answering(listener);
+
+    let mut peer = ek_ek_peer::Peer::dial(address, &NodeId::new("node-1"), SCHEMA, &client)
+        .await
+        .expect("the peer answers");
+
+    let answer = peer
+        .call("echo", serde_json::json!({ "n": 1 }))
+        .await
+        .expect("the service answers");
+    // The service is told who called by the certificate, not by the body.
+    assert_eq!(answer["from"], "node-2");
+    assert_eq!(answer["body"]["n"], 1);
+
+    let refused = peer
+        .call("raft.append_entries", serde_json::json!({}))
+        .await
+        .expect_err("a service this node does not run is refused");
+    assert_eq!(refused.reason(), Reason::Protocol);
+    assert!(
+        refused.detail().contains("raft.append_entries"),
+        "the refusal does not name the service: {refused}"
+    );
+
+    drop(peer);
+    let served = served
+        .await
+        .expect("the task finishes")
+        .expect("the peer was served");
+    assert_eq!(served.calls, 2, "the calls were not counted: {served:?}");
+}
+
+#[tokio::test]
+async fn the_channel_is_a_line_of_json_and_nothing_is_readable_off_the_wire() {
     // The bytes a listener actually receives, taken before OpenSSL sees them.
     // A channel that carried the message in the clear would show the field
     // names here, and a packet capture in the lab reads the same wire.
@@ -314,19 +466,16 @@ fn the_channel_is_a_line_of_json_and_nothing_is_readable_off_the_wire() {
 
     // The dial fails, because nothing on the other end speaks TLS. What
     // matters is what reached the wire before it did.
-    drop(ek_ek_peer::ask_health(
-        address,
-        &NodeId::new("node-1"),
-        &client,
-    ));
+    drop(ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &client).await);
     drop(server);
 
     let seen = watching.join().expect("the thread finishes");
     assert!(!seen.is_empty(), "nothing reached the wire");
     for marker in [
         b"message".as_slice(),
-        b"health".as_slice(),
+        b"hello".as_slice(),
         b"protocol".as_slice(),
+        b"schema_version".as_slice(),
     ] {
         assert!(
             !seen.windows(marker.len()).any(|window| window == marker),
@@ -336,8 +485,8 @@ fn the_channel_is_a_line_of_json_and_nothing_is_readable_off_the_wire() {
     }
 }
 
-#[test]
-fn a_peer_that_names_a_different_node_than_it_proved_is_refused() {
+#[tokio::test]
+async fn a_peer_that_names_a_different_node_than_it_proved_is_refused() {
     // A message says whatever its sender types. Only the certificate was
     // signed by the authority, so where the two disagree the message is the
     // one to throw away.
@@ -364,17 +513,20 @@ fn a_peer_that_names_a_different_node_than_it_proved_is_refused() {
         let mut stream = acceptor.accept(accepted).expect("the handshake completes");
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut stream), &mut line)
-            .expect("a question arrives");
+            .expect("a greeting arrives");
         // A valid certificate for node-1, and an answer claiming to be
         // somebody else.
         let _ = stream.write_all(
-            format!("{{\"message\":\"health\",\"protocol\":\"{PROTOCOL}\",\"node\":\"node-9\"}}\n")
-                .as_bytes(),
+            format!(
+                "{{\"message\":\"hello\",\"protocol\":\"{PROTOCOL}\",\"schema_version\":{SCHEMA},\"node\":\"node-9\"}}\n"
+            )
+            .as_bytes(),
         );
         let _ = stream.flush();
     });
 
-    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), &client)
+    let failure = ek_ek_peer::ask_health(address, &NodeId::new("node-1"), SCHEMA, &client)
+        .await
         .expect_err("an answer that names another node is refused");
     assert_eq!(failure.reason(), Reason::Protocol);
     assert!(
@@ -384,55 +536,90 @@ fn a_peer_that_names_a_different_node_than_it_proved_is_refused() {
     drop(answering.join());
 }
 
-#[test]
-fn a_peer_that_cannot_speak_the_newest_tls_is_refused() {
+#[tokio::test]
+async fn a_peer_that_cannot_speak_the_newest_tls_is_refused() {
     // Every peer is this same product, so there is no old client to keep and
     // no reason to offer anything below the newest version.
     let authority = authority();
     let server = credentials(&authority, &issue(&authority, "node-1"));
     let client = credentials(&authority, &issue(&authority, "node-2"));
 
-    let dial = |ceiling: SslVersion| {
-        let (listener, address) = listening("node-1", &server);
-        let answering = thread::spawn(move || listener.serve_one());
+    async fn dial(
+        server: &Credentials,
+        client: &Credentials,
+        ceiling: SslVersion,
+    ) -> Result<(), String> {
+        let (listener, address) = listening("node-1", server).await;
+        let served = answering(listener);
+        let client = client.clone();
 
-        let mut builder =
-            SslConnector::builder(SslMethod::tls_client()).expect("a connector builds");
-        builder
-            .set_max_proto_version(Some(ceiling))
-            .expect("the ceiling is set");
-        let certificate = openssl::x509::X509::from_pem(client.certificate_pem.as_bytes())
-            .expect("a certificate");
-        let key =
-            openssl::pkey::PKey::private_key_from_pem(client.key_pem.expose()).expect("a key");
-        let mut store = openssl::x509::store::X509StoreBuilder::new().expect("a store");
-        store
-            .add_cert(
-                openssl::x509::X509::from_pem(client.authority_pem.as_bytes())
-                    .expect("an authority"),
-            )
-            .expect("the authority is trusted");
-        builder.set_cert_store(store.build());
-        builder.set_certificate(&certificate).expect("accepted");
-        builder.set_private_key(&key).expect("accepted");
-        let connector = builder.build();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut builder =
+                SslConnector::builder(SslMethod::tls_client()).expect("a connector builds");
+            builder
+                .set_max_proto_version(Some(ceiling))
+                .expect("the ceiling is set");
+            with_material(&mut builder, &client);
+            let connector = builder.build();
 
-        let socket = TcpStream::connect(address).expect("the port answers");
-        let outcome = connector
-            .configure()
-            .expect("configurable")
-            .connect("node-1", socket)
-            .map(|_| ())
-            .map_err(|error| error.to_string());
-        drop(answering.join());
+            let socket = TcpStream::connect(address).expect("the port answers");
+            connector
+                .configure()
+                .expect("configurable")
+                .connect("node-1", socket)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("the client finishes");
+
+        served.abort();
         outcome
-    };
+    }
 
     assert!(
-        dial(SslVersion::TLS1_2).is_err(),
+        dial(&server, &client, SslVersion::TLS1_2).await.is_err(),
         "a peer that can speak no newer than TLS 1.2 was served"
     );
     // And the newest one is, so the refusal above is the floor and not a
     // listener that turns everybody away.
-    assert!(dial(SslVersion::TLS1_3).is_ok());
+    assert!(dial(&server, &client, SslVersion::TLS1_3).await.is_ok());
+}
+
+/// A blocking TLS client that presents this cluster's material.
+///
+/// Used where a measurement has to write a line the product's own client would
+/// never write.
+fn raw_client(
+    address: SocketAddr,
+    credentials: &Credentials,
+    expect: &str,
+) -> openssl::ssl::SslStream<TcpStream> {
+    let mut builder = SslConnector::builder(SslMethod::tls_client()).expect("a connector builds");
+    with_material(&mut builder, credentials);
+    let connector = builder.build();
+    let socket = TcpStream::connect(address).expect("the port answers");
+    connector
+        .configure()
+        .expect("configurable")
+        .connect(expect, socket)
+        .expect("the handshake completes")
+}
+
+/// Puts one node's certificate, key and authority on a connector.
+fn with_material(builder: &mut openssl::ssl::SslConnectorBuilder, credentials: &Credentials) {
+    let certificate = openssl::x509::X509::from_pem(credentials.certificate_pem.as_bytes())
+        .expect("a certificate");
+    let key =
+        openssl::pkey::PKey::private_key_from_pem(credentials.key_pem.expose()).expect("a key");
+    let mut store = openssl::x509::store::X509StoreBuilder::new().expect("a store");
+    store
+        .add_cert(
+            openssl::x509::X509::from_pem(credentials.authority_pem.as_bytes())
+                .expect("an authority"),
+        )
+        .expect("the authority is trusted");
+    builder.set_cert_store(store.build());
+    builder.set_certificate(&certificate).expect("accepted");
+    builder.set_private_key(&key).expect("accepted");
 }

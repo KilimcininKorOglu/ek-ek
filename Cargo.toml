@@ -54,6 +54,10 @@ arc-swap = "1"
 # a body of its own.
 bytes = "1"
 async-trait = "0.1"
+# Async TLS on top of the same openssl the rest of the tree speaks. The peer
+# channel carries Raft, so both ends have to be async, and a second TLS stack
+# is what ADR-0068 rules out.
+tokio-openssl = "0.6"
 # The library pingora's openssl backend already uses, so both sides of a
 # handshake agree on what a certificate is (ADR-0068). A dev-dependency
 # wherever tests build certificates and speak TLS from the client side, and a
