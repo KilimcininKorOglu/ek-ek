@@ -40,6 +40,19 @@ RULES = [
     ("ek-ek-peer", "ek-ek-dataplane", "peer trust must not reach the traffic path"),
     ("ek-ek-peer", "ek-ek-vrrp", "peer trust has nothing to do with VRRP"),
     ("ek-ek-config", "ek-ek-peer", "the config model is the base layer"),
+    # ADR-0004's invariant: losing quorum must never affect the traffic path.
+    # A sentence in a document is not a boundary unless the build refuses to
+    # cross it, so it is a rule in both directions (ADR-0083).
+    ("ek-ek-raft", "ek-ek-dataplane", "quorum loss must not reach the traffic path"),
+    ("ek-ek-raft", "ek-ek-vrrp", "consensus has nothing to do with VRRP"),
+    ("ek-ek-dataplane", "ek-ek-raft", "the traffic path must not wait on a quorum"),
+    ("ek-ek-vrrp", "ek-ek-raft", "VRRP decides who holds an address without a quorum"),
+    ("ek-ek-raft", "ek-ek-tls", "consensus is not the certificate an operator uploads"),
+    ("ek-ek-config", "ek-ek-raft", "the config model is the base layer"),
+    # The channel carries a service name and an opaque body. Teaching it what
+    # a Raft message is would put the state machine below the transport.
+    ("ek-ek-peer", "ek-ek-raft", "the channel must not know what it carries"),
+    ("ek-ek-store", "ek-ek-raft", "the store is measured without consensus anywhere near it"),
 ]
 
 # Crates that must depend on no workspace crate at all.

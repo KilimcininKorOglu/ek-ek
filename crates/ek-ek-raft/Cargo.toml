@@ -1,0 +1,39 @@
+[package]
+name = "ek-ek-raft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Never published to a registry; the product ships as a distribution package.
+publish = false
+description = "Config replication: the Raft state machine, its log and its transport"
+
+[dependencies]
+# The config model the state machine holds.
+ek-ek-config = { workspace = true }
+# The state machine itself. The store knows nothing about consensus; this
+# crate is what wraps it (ADR-0083).
+ek-ek-store = { workspace = true }
+# The transport. Raft rides the peer channel, with the same certificates and
+# the same trust (ADR-0082, ADR-0083).
+ek-ek-peer = { workspace = true }
+openraft = { workspace = true }
+serde = { workspace = true }
+# The number consensus calls a node is derived from its name; the config
+# derives a virtual router id from a name the same way.
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+# The measurements run three real Raft nodes against three real stores on
+# disk, because a state machine that only ever runs in memory proves nothing
+# about a node that restarts.
+tempfile = { workspace = true }
+# The derivation is measured against a digest taken here, so a comparison
+# never runs against the function that produced it.
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

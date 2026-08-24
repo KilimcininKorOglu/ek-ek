@@ -58,6 +58,12 @@ async-trait = "0.1"
 # channel carries Raft, so both ends have to be async, and a second TLS stack
 # is what ADR-0068 rules out.
 tokio-openssl = "0.6"
+# The consensus library the control plane runs on (ADR-0004). Pinned to the
+# last stable line: 0.10 is still alpha and a consensus API that moves with
+# every alpha is not one to build config replication on (ADR-0083).
+# `storage-v2` is what lets a crate outside openraft implement the storage
+# traits at all; without it they are sealed.
+openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 # The library pingora's openssl backend already uses, so both sides of a
 # handshake agree on what a certificate is (ADR-0068). A dev-dependency
 # wherever tests build certificates and speak TLS from the client side, and a
@@ -101,6 +107,7 @@ ek-ek-log = { path = "crates/ek-ek-log" }
 # Peer trust and the certificates an operator uploads are separate trust
 # domains (ADR-0008), so ek-ek-peer and ek-ek-tls never depend on each other.
 ek-ek-peer = { path = "crates/ek-ek-peer" }
+ek-ek-raft = { path = "crates/ek-ek-raft" }
 ek-ek-store = { path = "crates/ek-ek-store" }
 ek-ek-tls = { path = "crates/ek-ek-tls" }
 ek-ek-vrrp = { path = "crates/ek-ek-vrrp" }
