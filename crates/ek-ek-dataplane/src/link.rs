@@ -33,6 +33,15 @@ pub const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 /// How often a status report goes out.
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long the first exchange with the agent may take.
+///
+/// The agent is a local process handing over a document it already holds, so
+/// this is generous. It exists because the alternative is worse than being
+/// slow: an agent that accepts the connection and then says nothing leaves the
+/// traffic path waiting forever, serving nothing, logging nothing and telling
+/// nobody why.
+pub const FIRST_EXCHANGE_PATIENCE: Duration = Duration::from_secs(10);
+
 /// The traffic path's side of the connection to `node-agent`.
 #[derive(Debug)]
 pub struct AgentLink {
@@ -62,8 +71,26 @@ impl AgentLink {
         let socket = socket.as_ref().to_path_buf();
         let mut stream = connect(&socket).await?;
 
-        say_hello(&mut stream, None).await?;
-        let update = read_first_config(&mut stream).await?;
+        // Bounded as a whole rather than per step, because what matters is
+        // that the traffic path either starts or says why, not which of the
+        // three steps was the slow one.
+        let first = async {
+            say_hello(&mut stream, None).await?;
+            read_first_config(&mut stream).await
+        };
+        let update = match tokio::time::timeout(FIRST_EXCHANGE_PATIENCE, first).await {
+            Ok(update) => update?,
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::AgentUnreachable,
+                    format!(
+                        "{} accepted the connection and sent no configuration within {} seconds",
+                        socket.display(),
+                        FIRST_EXCHANGE_PATIENCE.as_secs()
+                    ),
+                ));
+            }
+        };
         drop(stream);
 
         validate(&update.config).map_err(|errors| {
