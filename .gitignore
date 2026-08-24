@@ -28,6 +28,11 @@ docker-data/
 coverage/
 *.profraw
 
+# Derleme çıktısının nereye yazılacağı makineye özgü bir seçim. Bu depo bir
+# iCloud'a bağlı dizinde duruyorsa target/ senkronizasyon adayı olur, ve
+# geliştirici onu başka bir yola alabilir.
+/.cargo/config.toml
+
 # İç planlama ve tasarım kaynakları (ADR-0047)
 plan/
 design/
