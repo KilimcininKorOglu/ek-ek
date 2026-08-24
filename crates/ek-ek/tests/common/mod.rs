@@ -41,26 +41,73 @@ static AT_ONCE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 /// nothing measures.
 const ANSWER_PATIENCE: Duration = Duration::from_secs(15);
 
-/// Where this test binary's own port range starts.
-///
-/// Derived from the process id so two test binaries running at once do not
-/// hand out the same numbers.
+/// How far into this binary's block the next port comes from.
 static NEXT_PORT: AtomicU64 = AtomicU64::new(0);
+
+/// How many ports one test binary's block holds.
+const BLOCK_SIZE: u16 = 100;
+
+/// The lowest block, and the first one past the last.
+const BLOCK_RANGE: (u16, u16) = (20_000, 60_000);
+
+/// The block this test binary hands ports out of.
+///
+/// Claimed rather than derived. Deriving it from the process id looked unique
+/// and was not: two binaries whose ids are `pid % 400` apart were given the
+/// same block, both handed out the same number, and the one that lost the race
+/// failed to bind. That reads as a product fault ("address in use") in a test
+/// about something else.
+///
+/// The claim is a socket held open for as long as the process lives. A second
+/// binary cannot bind it, so it takes the next block instead. Nothing is ever
+/// dropped out of `CLAIMED`: releasing the socket would release the block.
+static CLAIMED: std::sync::Mutex<Vec<std::net::TcpListener>> = std::sync::Mutex::new(Vec::new());
+
+fn block() -> u16 {
+    static BLOCK: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *BLOCK.get_or_init(|| {
+        let mut base = BLOCK_RANGE.0;
+        while base < BLOCK_RANGE.1 - BLOCK_SIZE {
+            if let Ok(sentinel) = std::net::TcpListener::bind(("127.0.0.1", base)) {
+                CLAIMED
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .push(sentinel);
+                return base;
+            }
+            base += BLOCK_SIZE;
+        }
+        panic!(
+            "every port block between {} and {} is taken",
+            BLOCK_RANGE.0, BLOCK_RANGE.1
+        )
+    })
+}
 
 /// A port nothing is listening on.
 ///
-/// Walks a range of its own rather than asking the kernel for any free port.
-/// The kernel's answer has to be released before the binary under test can
-/// bind it, and in that gap a parallel test takes it: the binary then fails
-/// to bind, exits, and the test reads it as a product fault.
+/// Walks this binary's own block rather than asking the kernel for any free
+/// port. The kernel's answer has to be released before the binary under test
+/// can bind it, and in that gap a parallel test takes it: the binary then
+/// fails to bind, exits, and the test reads it as a product fault.
+///
+/// The first port of the block is the claim above and is never handed out.
 #[must_use]
 pub fn free_port() -> u16 {
-    let base = 20_000 + u64::from(std::process::id() % 400) * 100;
+    let base = block();
+    // Where in the block this binary starts is rotated by the process id, so
+    // two runs one after the other do not open the same number. A port the
+    // previous run closed from its own end sits in TIME_WAIT for up to a
+    // minute, and binding it again fails; the traffic path then retries for
+    // half a minute and the test reads that as "it never started listening".
+    let turn = u64::from(std::process::id());
     loop {
         let at = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-        let port = u16::try_from(base + at % 100).unwrap_or(20_000);
-        // Bound and released only to prove nothing else holds it. Two callers
-        // never get the same number, so the gap that matters does not exist.
+        let step = u16::try_from((at + turn) % u64::from(BLOCK_SIZE - 1)).unwrap_or(0);
+        let port = base + 1 + step;
+        // Bound and released only to prove nothing else holds it. Inside this
+        // block nothing else hands out numbers, so the gap that matters is
+        // gone.
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
@@ -2140,9 +2187,22 @@ impl RawMember {
                             }
                             Ok(read) => {
                                 seen.extend_from_slice(&buffer[..read]);
+                                // The echo can fail because the other end has
+                                // already gone: a client that writes and
+                                // closes at once makes the proxy drop this
+                                // socket while the echo is still on its way.
+                                // What arrived still arrived, so it is
+                                // recorded rather than lost. Returning here
+                                // without recording made every measurement
+                                // that reads these bytes fail about one run
+                                // in twenty.
                                 if matches!(behaviour, RawBehaviour::Echo)
                                     && stream.write_all(&buffer[..read]).await.is_err()
                                 {
+                                    hung_up.fetch_add(1, Ordering::SeqCst);
+                                    if let Ok(mut store) = collected.lock() {
+                                        store.push(seen);
+                                    }
                                     return;
                                 }
                             }
@@ -2168,15 +2228,24 @@ impl RawMember {
         self.accepted.load(Ordering::SeqCst)
     }
 
-    /// Waits for the readiness connection to land, then forgets everything
-    /// counted so far.
+    /// Waits for the readiness connection to land and finish, then forgets
+    /// everything counted so far.
     ///
-    /// Without the wait the probe could still be in flight and land after the
-    /// reset, which would put the count one out in the other direction.
+    /// Both halves of the wait matter. Without the first the probe could still
+    /// be in flight and land after the reset, which would put the count one
+    /// out in the other direction. Without the second the probe is accepted,
+    /// the reset runs, and then the probe closes and pushes its record: the
+    /// next test reads the probe's bytes as its own connection.
     pub async fn settle(&self) {
         let start = tokio::time::Instant::now();
         while self.accepted.load(Ordering::SeqCst) == 0 {
             if start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        while self.closed.load(Ordering::SeqCst) < self.accepted.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(10) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
