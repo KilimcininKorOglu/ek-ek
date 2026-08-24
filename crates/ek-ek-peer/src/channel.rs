@@ -38,7 +38,7 @@ use openssl::pkey::{PKey, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod, SslVerifyMode, SslVersion};
 use openssl::x509::X509;
 use openssl::x509::store::{X509Store, X509StoreBuilder};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
@@ -56,6 +56,12 @@ use crate::wire::{MOST_LINE_BYTES, decode, encode};
 /// in a cluster has to agree on it, and a per-node setting would be a way to
 /// build a cluster where half the nodes cannot reach the other half.
 pub const DEFAULT_PORT: u16 = 7373;
+
+/// How long a refused caller is given to take its refusal and go.
+///
+/// Only ever waited out by a caller that says nothing and does not close, and
+/// such a caller is being turned away anyway.
+const FAREWELL: Duration = Duration::from_secs(1);
 
 /// How long a peer has to finish what it started.
 ///
@@ -330,6 +336,7 @@ impl Listener {
             &format!("{} was removed from this cluster", caller.as_str()),
         );
         write_line(stream, &refused).await?;
+        farewell(stream).await;
         Err(Failure::new(
             Reason::Rejected,
             format!("{} was removed from this cluster", caller.as_str()),
@@ -944,6 +951,27 @@ where
             ));
         }
     }
+}
+
+/// Closes a refused connection so the refusal survives the closing.
+///
+/// A socket that still holds bytes nobody read is reset rather than closed,
+/// and a reset throws away whatever was already written to it. The caller of
+/// a refused connection has usually already sent its greeting, so closing
+/// straight after writing the refusal makes the caller read "connection reset"
+/// instead of the reason it was turned away.
+///
+/// So the write side is closed first, which puts the refusal and the TLS
+/// close on the wire, and then whatever the caller sent is read out until it
+/// closes its own side. Nothing here is worth failing over: the connection is
+/// going either way.
+async fn farewell(stream: &mut SslStream<TcpStream>) {
+    let _ = stream.shutdown().await;
+    let mut sink = [0_u8; 1024];
+    let _ = tokio::time::timeout(FAREWELL, async {
+        while matches!(stream.read(&mut sink).await, Ok(read) if read > 0) {}
+    })
+    .await;
 }
 
 async fn write_line<W, T>(writer: &mut W, message: &T) -> Result<(), Failure>
