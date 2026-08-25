@@ -30,6 +30,13 @@ x-node: &node
   environment:
     HOST_UID: ${HOST_UID:-1000}
     HOST_GID: ${HOST_GID:-1000}
+  # A virtual address is only on the interface of the node that holds the
+  # role, and every node's traffic path binds a listener to it. Docker mounts
+  # /proc/sys read only, so the agent cannot set this itself here the way it
+  # does on a real host; declaring it puts the same value in the container's
+  # own network namespace (ADR-0087).
+  sysctls:
+    net.ipv4.ip_nonlocal_bind: "1"
   restart: "no"
 
 services:
@@ -223,6 +230,54 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.42
+
+  # systemd as PID 1, for the one question the rest of the lab cannot answer:
+  # does the supervision work when systemd starts it, as a non-root user, with
+  # the capabilities granted ambiently (ADR-0012, ADR-0087)?
+  #
+  # Docker grants added capabilities to root only. Everywhere else in this lab
+  # the processes run as root for that reason, which means "it works with
+  # NET_ADMIN" has only ever been measured for root. Here it is measured for
+  # the service user the product actually ships under.
+  #
+  # cgroup access is what systemd needs to be PID 1 at all. It is granted read
+  # and write here rather than by running the container privileged, so the
+  # container still cannot reach the host's devices.
+  systemd:
+    build:
+      context: .
+      dockerfile: Dockerfile.systemd
+    image: ek-ek-systemd:latest
+    container_name: ek-ek-systemd
+    hostname: systemd
+    restart: "no"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # systemd is PID 1 here and writes its own cgroup hierarchy. Given the
+    # host's rather than running the container privileged, so the container
+    # still cannot reach the host's devices.
+    cgroup: host
+    # As for the other nodes, and for one more reason: here the agent runs as
+    # a user with three capabilities and none of them is CAP_SYS_ADMIN, so it
+    # could not write the knob even if /proc/sys were writable. On a real host
+    # the installation sets it (T-060); this container cannot measure that
+    # half, only the unit, the user, the capabilities and the supervision.
+    sysctls:
+      net.ipv4.ip_nonlocal_bind: "1"
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ../docker-data/systemd:/opt/ek-ek
+    environment:
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+    networks:
+      lab:
+        ipv4_address: 172.28.0.51
 
 networks:
   lab:

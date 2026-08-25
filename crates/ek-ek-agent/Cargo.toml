@@ -9,6 +9,18 @@ publish = false
 description = "node-agent: process supervision, upgrade choreography and cluster coordination"
 
 [dependencies]
+# The child is told to die with its parent, which is a `prctl` call made
+# between fork and exec. Nothing in the standard library reaches it.
+libc = { workspace = true }
+# The wire between the two processes.
+ek-ek-ipc = { workspace = true }
+# A configuration the agent refuses is one the traffic path would stop on,
+# so it is read and validated here before it is ever delivered.
+ek-ek-config = { workspace = true }
+serde_json = { workspace = true }
+# The agent hosts the virtual router beside the supervision (ADR-0087).
+[target.'cfg(target_os = "linux")'.dependencies]
+ek-ek-vrrp = { workspace = true }
 
 [lints]
 workspace = true

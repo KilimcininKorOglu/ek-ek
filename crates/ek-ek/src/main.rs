@@ -6,7 +6,9 @@
 //! One binary runs two processes (ADR-0002). `node-agent` is what an operator
 //! starts; it supervises `data-plane` and replaces it when a listener changes.
 
+use std::net::Ipv4Addr;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -33,7 +35,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the node agent: configuration store, cluster, VRRP and web interface
-    NodeAgent,
+    NodeAgent(NodeAgentArgs),
 
     /// Run the traffic path. Started by node-agent, not meant to be run directly
     DataPlane(DataPlaneArgs),
@@ -291,6 +293,85 @@ struct MatrixArgs {
 }
 
 #[derive(Args)]
+struct NodeAgentArgs {
+    /// Unix socket the traffic path takes its configuration from
+    #[arg(long, default_value = ek_ek_ipc::SOCKET_PATH)]
+    socket: String,
+
+    /// Configuration document to deliver to the traffic path
+    #[arg(long)]
+    config: String,
+
+    /// Program to run as the traffic path. Defaults to this binary, because
+    /// one binary runs both processes (ADR-0002)
+    #[arg(long)]
+    data_plane: Option<String>,
+
+    /// How often the traffic path is asked whether it is still answering
+    #[arg(long, default_value_t = 500)]
+    asking_ms: u64,
+
+    /// How many questions may go unanswered before it counts as crashed
+    #[arg(long, default_value_t = 3)]
+    patience: u32,
+
+    /// This node's own address, which advertisements come from. Given only
+    /// when this node runs a virtual router
+    #[arg(long)]
+    address: Option<Ipv4Addr>,
+
+    /// Another node's address. May be given more than once. Unicast only
+    #[arg(long = "peer")]
+    peers: Vec<Ipv4Addr>,
+
+    /// Interface the virtual addresses are put on
+    #[arg(long, default_value = "eth0")]
+    interface: String,
+
+    /// Virtual address to carry, written `address/prefix`. May be given more
+    /// than once
+    #[arg(long = "virtual-address")]
+    virtual_addresses: Vec<String>,
+
+    /// Which virtual router this is
+    #[arg(long, default_value_t = 51)]
+    vrid: u8,
+
+    /// The claim this node makes when everything is well
+    #[arg(long, default_value_t = 100)]
+    priority: u8,
+
+    /// How often an advertisement goes out
+    #[arg(long, default_value_t = 300)]
+    interval_ms: u64,
+
+    /// Leave the role with whoever holds it, even when this node is stronger
+    #[arg(long)]
+    no_preempt: bool,
+
+    /// Take the addresses without announcing the move. The negative control
+    /// for a measurement, never something an installation wants
+    #[arg(long)]
+    silent: bool,
+
+    /// Give the addresses up when the default gateway stops answering
+    #[arg(long)]
+    watch_gateway: bool,
+
+    /// How often the gateway is asked
+    #[arg(long, default_value_t = 2_000)]
+    check_interval_ms: u64,
+
+    /// How many answers have to go missing before the claim is lowered
+    #[arg(long, default_value_t = 3)]
+    failures: u32,
+
+    /// What the claim is lowered to when this node cannot serve
+    #[arg(long, default_value_t = 1)]
+    demoted_priority: u8,
+}
+
+#[derive(Args)]
 struct DataPlaneArgs {
     /// Unix socket the node agent listens on
     #[arg(long, default_value = ek_ek_ipc::SOCKET_PATH)]
@@ -301,93 +382,75 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::NodeAgent => {
-            println!("node-agent is not implemented yet");
-        }
-        Command::DataPlane(args) => return run_data_plane(&args),
-        Command::Matrix(args) => return show_matrix(&args),
-        Command::Acme(args) => {
-            return acme::order(&acme::Arguments {
-                config: &args.config,
-                data_dir: &args.data_dir,
-                certificate: &args.certificate,
-                challenges: &args.challenges,
-            });
-        }
-        Command::Renew(args) => {
-            return renew::sweep(&renew::Arguments {
-                config: &args.config,
-                data_dir: &args.data_dir,
-                challenges: &args.challenges,
-                at: args.now,
-                metrics: args.metrics.as_deref(),
-            });
-        }
-        Command::Secret(SecretCommand::Set(args)) => {
-            return secret::set(&secret::Arguments {
-                data_dir: &args.data_dir,
-                id: &args.id,
-                from_file: &args.from_file,
-                config: args.config.as_deref(),
-            });
-        }
-        Command::Cluster(ClusterCommand::Init(args)) => {
-            return cluster::init(&cluster::InitArguments {
-                data_dir: &args.data_dir,
-                config: args.config.as_deref(),
-            });
-        }
+        Command::NodeAgent(args) => run_node_agent(&args),
+        Command::DataPlane(args) => run_data_plane(&args),
+        Command::Matrix(args) => show_matrix(&args),
+        Command::Acme(args) => acme::order(&acme::Arguments {
+            config: &args.config,
+            data_dir: &args.data_dir,
+            certificate: &args.certificate,
+            challenges: &args.challenges,
+        }),
+        Command::Renew(args) => renew::sweep(&renew::Arguments {
+            config: &args.config,
+            data_dir: &args.data_dir,
+            challenges: &args.challenges,
+            at: args.now,
+            metrics: args.metrics.as_deref(),
+        }),
+        Command::Secret(SecretCommand::Set(args)) => secret::set(&secret::Arguments {
+            data_dir: &args.data_dir,
+            id: &args.id,
+            from_file: &args.from_file,
+            config: args.config.as_deref(),
+        }),
+        Command::Cluster(ClusterCommand::Init(args)) => cluster::init(&cluster::InitArguments {
+            data_dir: &args.data_dir,
+            config: args.config.as_deref(),
+        }),
         Command::Cluster(ClusterCommand::Fingerprint(args)) => {
-            return cluster::fingerprint(&cluster::FingerprintArguments {
+            cluster::fingerprint(&cluster::FingerprintArguments {
                 data_dir: &args.data_dir,
-            });
+            })
         }
         Command::Cluster(ClusterCommand::Enroll(args)) => {
-            return cluster::enroll(&cluster::EnrollArguments {
+            cluster::enroll(&cluster::EnrollArguments {
                 data_dir: &args.data_dir,
                 node: &args.node,
                 addresses: &args.addresses,
                 out_dir: &args.out_dir,
                 at: args.now,
                 force: args.force,
-            });
+            })
         }
-        Command::Cluster(ClusterCommand::Serve(args)) => {
-            return cluster::serve(&cluster::ServeArguments {
-                listen: &args.listen,
-                node: &args.node,
-                material: &args.material,
-                connections: args.connections,
-            });
-        }
-        Command::Cluster(ClusterCommand::Node(args)) => {
-            return cluster::node(&cluster::NodeArguments {
-                data_dir: &args.data_dir,
-                node: &args.node,
-                material: &args.material,
-                listen: &args.listen,
-                initialise: args.initialise.as_deref(),
-                apply: args.apply.as_deref(),
-                challenges: args.challenges.as_deref(),
-                acme: args.acme,
-            });
-        }
+        Command::Cluster(ClusterCommand::Serve(args)) => cluster::serve(&cluster::ServeArguments {
+            listen: &args.listen,
+            node: &args.node,
+            material: &args.material,
+            connections: args.connections,
+        }),
+        Command::Cluster(ClusterCommand::Node(args)) => cluster::node(&cluster::NodeArguments {
+            data_dir: &args.data_dir,
+            node: &args.node,
+            material: &args.material,
+            listen: &args.listen,
+            initialise: args.initialise.as_deref(),
+            apply: args.apply.as_deref(),
+            challenges: args.challenges.as_deref(),
+            acme: args.acme,
+        }),
         Command::Cluster(ClusterCommand::Status(args)) => {
-            return cluster::status(&cluster::StatusArguments {
+            cluster::status(&cluster::StatusArguments {
                 data_dir: &args.data_dir,
-            });
+            })
         }
-        Command::Cluster(ClusterCommand::Ping(args)) => {
-            return cluster::ping(&cluster::PingArguments {
-                to: &args.to,
-                expect: &args.expect,
-                node: &args.node,
-                material: &args.material,
-            });
-        }
+        Command::Cluster(ClusterCommand::Ping(args)) => cluster::ping(&cluster::PingArguments {
+            to: &args.to,
+            expect: &args.expect,
+            node: &args.node,
+            material: &args.material,
+        }),
     }
-
-    ExitCode::SUCCESS
 }
 
 /// Prints the virtual router matrix a configuration produces.
@@ -479,6 +542,76 @@ fn show_matrix(args: &MatrixArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Runs the node agent: the traffic path's supervisor and the virtual router.
+///
+/// One binary, two processes (ADR-0002). This is the one an operator starts;
+/// it starts the other and replaces it when it goes.
+fn run_node_agent(args: &NodeAgentArgs) -> ExitCode {
+    if let Err(error) = ek_ek_log::install(ek_ek_log::Level::default()) {
+        eprintln!("node-agent: the logger could not be installed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    // This binary by default, because the two processes ship as one file. An
+    // override exists so a measurement can point the supervision at something
+    // that crashes on purpose.
+    let program = match args.data_plane.clone() {
+        Some(program) => program,
+        None => match std::env::current_exe() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                eprintln!("node-agent: this binary's own path could not be read: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let router = match args.address {
+        None => None,
+        Some(address) => {
+            let mut carried = Vec::with_capacity(args.virtual_addresses.len());
+            for text in &args.virtual_addresses {
+                match ek_ek_agent::carrying(text) {
+                    Ok(one) => carried.push(one),
+                    Err(complaint) => {
+                        eprintln!("node-agent: {complaint}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            Some(ek_ek_agent::Vrrp {
+                address,
+                peers: args.peers.clone(),
+                interface: args.interface.clone(),
+                carried,
+                vrid: args.vrid,
+                priority: args.priority,
+                interval: Duration::from_millis(args.interval_ms),
+                preempt: !args.no_preempt,
+                silent: args.silent,
+                watch_gateway: args.watch_gateway,
+                check_interval: Duration::from_millis(args.check_interval_ms),
+                failures: args.failures,
+                demoted_priority: args.demoted_priority,
+            })
+        }
+    };
+
+    ek_ek_agent::run(ek_ek_agent::Plan {
+        socket: &args.socket,
+        config: &args.config,
+        program: &program,
+        arguments: vec![
+            "data-plane".to_owned(),
+            "--agent-socket".to_owned(),
+            args.socket.clone(),
+        ],
+        asking: Duration::from_millis(args.asking_ms),
+        patience: args.patience,
+        router,
+    })
+}
+
 /// Starts the traffic path.
 ///
 /// The agent has to be there. Without it there is no configuration, and a
@@ -493,6 +626,7 @@ fn run_data_plane(args: &DataPlaneArgs) -> ExitCode {
         eprintln!("data-plane: the logger could not be installed: {error}");
         return ExitCode::FAILURE;
     }
+    ek_ek_dataplane::end_on_a_panic();
 
     let link = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

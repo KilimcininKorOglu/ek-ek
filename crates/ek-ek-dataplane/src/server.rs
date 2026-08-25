@@ -30,8 +30,11 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::handshake::SniResolver;
 use crate::health::{Checked, Health, checked, watch};
 use crate::link::AgentLink;
-use crate::live::LiveConfig;
+use crate::live::{LiveConfig, Status};
 use crate::policy;
+
+/// How often the listeners are tried while any of them is not up yet.
+const LISTENING_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 use crate::proxy::Proxy;
 use crate::stream::StreamProxy;
 use crate::udpproxy::{UdpProxy, udp_bindings};
@@ -164,6 +167,12 @@ pub fn build(link: AgentLink) -> Result<Server> {
 
     let bindings = bindings(&live.load().config)?;
     let tcp_listeners = bindings.len();
+    // Kept, so the process can check its own listeners once they are up
+    // rather than saying it is serving because it was asked to build them.
+    let listening_on: Vec<String> = bindings
+        .iter()
+        .map(|binding| binding.address.clone())
+        .collect();
     for binding in bindings {
         let name = format!("frontend {}", binding.frontend);
         match binding.kind {
@@ -275,7 +284,18 @@ pub fn build(link: AgentLink) -> Result<Server> {
         ));
     }
 
-    status.set_state(DataPlaneState::Serving);
+    // Not `Serving` here. Building the listeners is not the same as having
+    // them, and a process that said so before they were up would tell the
+    // agent this node can carry traffic while nothing answers on its port.
+    // The check below says it, once it has connected to every one of them
+    // (ADR-0087).
+    server.add_service(background_service(
+        "listening check",
+        ListeningCheck {
+            addresses: listening_on,
+            status: Arc::clone(&status),
+        },
+    ));
     // Health checking runs beside the traffic path rather than inside it, so
     // a slow probe never delays a request (T-021).
     server.add_service(background_service(
@@ -342,6 +362,30 @@ const LEAST_GRACE: u64 = 1;
 
 /// How long the runtimes get to unwind once the grace period has passed.
 const RUNTIME_SHUTDOWN: u64 = 5;
+
+/// Ends this process when any thread panics.
+///
+/// Each listener runs on its own thread. A thread that panics takes its
+/// listener with it and leaves the process running, still holding its socket
+/// to the agent and still answering the liveness question, while the port it
+/// was serving accepts nothing. The node then keeps its virtual address for a
+/// service that is gone, which is the total outage ADR-0033 exists to prevent.
+/// Measured in the lab: a listener that could not bind panicked its thread and
+/// the supervision went on calling the process healthy.
+///
+/// So a panic anywhere ends the process. The supervision sees a crash, gives
+/// the address up and starts it again, which is the behaviour every other way
+/// of failing already gets (ADR-0087).
+pub fn end_on_a_panic() {
+    let inherited = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panicked| {
+        inherited(panicked);
+        // Flushed by the hook above before this line. `abort` rather than
+        // `exit`, because `exit` runs destructors on a process whose state is
+        // whatever the panic left behind.
+        std::process::abort();
+    }));
+}
 
 /// Builds the server configuration that decides how long shutdown takes.
 ///
@@ -442,6 +486,145 @@ impl pingora::services::background::BackgroundService for UdpService {
 }
 
 /// Runs the agent link for as long as the server runs.
+/// Reads whether a socket is listening on this address out of a kernel table.
+///
+/// The table is `/proc/net/tcp` or `/proc/net/tcp6`, whose lines carry the
+/// local address, the port and the connection state. `0A` is `TCP_LISTEN`.
+///
+/// A listener on the unspecified address answers for every address on its
+/// port, so it counts for the one asked about. So does an IPv6 listener on
+/// `::` for an IPv4 address: a socket without `IPV6_V6ONLY` accepts both.
+// Read only on Linux, and measured everywhere. The parsing is what a
+// measurement can hold a table against without a kernel; the file read is
+// what only Linux has.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn listening_in(table: &str, wanted: SocketAddr) -> bool {
+    /// The state a listening socket is in.
+    const LISTEN: &str = "0A";
+
+    table.lines().skip(1).any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(local) = fields.next().and_then(|_slot| fields.next()) else {
+            return false;
+        };
+        if fields.next().and_then(|_remote| fields.next()) != Some(LISTEN) {
+            return false;
+        }
+
+        let Some((address, port)) = local.rsplit_once(':') else {
+            return false;
+        };
+        if u16::from_str_radix(port, 16) != Ok(wanted.port()) {
+            return false;
+        }
+        match read_address(address) {
+            Some(found) => found.is_unspecified() || found == wanted.ip(),
+            None => false,
+        }
+    })
+}
+
+/// Reads one address out of a kernel table's hex form.
+///
+/// Each word is a little endian `u32` printed big endian first, so the bytes
+/// come back in the order the address has them by reading each word the other
+/// way round.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn read_address(hex: &str) -> Option<std::net::IpAddr> {
+    match hex.len() {
+        8 => {
+            let word = u32::from_str_radix(hex, 16).ok()?;
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                word.to_le_bytes(),
+            )))
+        }
+        32 => {
+            let mut bytes = [0_u8; 16];
+            for (index, chunk) in hex.as_bytes().chunks(8).enumerate() {
+                let word = u32::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+                bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(bytes)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the kernel holds a listening socket on this address.
+///
+/// Both tables are read whatever the address is, because an IPv6 socket on
+/// `::` carries IPv4 traffic as well and appears only in the second one.
+#[cfg(target_os = "linux")]
+fn listening(wanted: SocketAddr) -> bool {
+    ["/proc/net/tcp", "/proc/net/tcp6"]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|table| listening_in(&table, wanted))
+}
+
+/// Says every address is listening, because this system has no such table.
+///
+/// The product runs on Linux (ADR-0007). Everywhere else this keeps the
+/// process from waiting for an answer that will never come; what it does not
+/// do is measure anything, and the state it reports says only that the
+/// services were started.
+#[cfg(not(target_os = "linux"))]
+fn listening(_wanted: SocketAddr) -> bool {
+    true
+}
+
+/// Watches this process's own listeners, and says so once they are up.
+///
+/// The one thing that turns "the listeners were built" into "the listeners
+/// are up". Everything about this process reaching the outside world runs
+/// through those sockets, and a supervisor told the process is serving before
+/// they accept anything would leave this node holding an address for a
+/// service that is not there (ADR-0033, ADR-0087).
+///
+/// Read out of the kernel rather than by connecting. A connection to a
+/// frontend is a request as far as the traffic path is concerned: it is
+/// accepted, a backend is chosen and a connection to it is opened. Checking
+/// by connecting would cost every backend one connection per start of this
+/// process, and a process that keeps crashing would keep making them.
+struct ListeningCheck {
+    /// The addresses to look for, in `host:port` form.
+    addresses: Vec<String>,
+    status: Arc<Status>,
+}
+
+#[async_trait]
+impl pingora::services::background::BackgroundService for ListeningCheck {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        // Nothing to check means nothing to wait for. A process with only UDP
+        // frontends serves the moment its loops are running.
+        if self.addresses.is_empty() {
+            self.status.set_state(DataPlaneState::Serving);
+            return;
+        }
+
+        let mut left: Vec<SocketAddr> = self
+            .addresses
+            .iter()
+            // An address this process cannot parse is one it never asked the
+            // kernel for either, so waiting on it would be waiting for ever.
+            .filter_map(|address| address.parse().ok())
+            .collect();
+        loop {
+            left.retain(|address| !listening(*address));
+            if left.is_empty() {
+                log::info!("data-plane: every listener is up, so this process is serving");
+                self.status.set_state(DataPlaneState::Serving);
+                return;
+            }
+
+            tokio::select! {
+                () = tokio::time::sleep(LISTENING_CHECK_INTERVAL) => {}
+                _ = shutdown.changed() => return,
+            }
+        }
+    }
+}
+
 struct LinkService {
     link: AgentLink,
 }
@@ -544,5 +727,204 @@ impl Running {
     fn stop(&self) {
         let _ = self.stop.send(true);
         self.handle.abort();
+    }
+}
+
+#[cfg(test)]
+// Test code may panic on a broken precondition. Product code may not.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use std::net::SocketAddr;
+    #[cfg(target_os = "linux")]
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use pingora::services::background::BackgroundService as _;
+
+    use super::{DataPlaneState, ListeningCheck, Status, listening_in};
+
+    /// A table with a header line, as the kernel writes it.
+    fn table(rows: &[&str]) -> String {
+        let mut written = String::from(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        );
+        for row in rows {
+            written.push_str(row);
+            written.push('\n');
+        }
+        written
+    }
+
+    fn address(text: &str) -> SocketAddr {
+        text.parse().expect("the address is one this test wrote")
+    }
+
+    #[test]
+    fn a_listening_socket_is_found_where_the_kernel_wrote_it() {
+        // 0100007F is 127.0.0.1 and 1F91 is 8081. The kernel prints each word
+        // of the address the other way round, so a reader that took the hex
+        // at face value would look for 1.0.0.127.
+        let held = table(&[
+            "   0: 0100007F:1F91 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(listening_in(&held, address("127.0.0.1:8081")));
+    }
+
+    #[test]
+    fn a_socket_that_is_not_listening_is_not_one_to_serve_on() {
+        // 01 is ESTABLISHED. A connection to this address is not a listener
+        // on it, and a process that took one for the other would call itself
+        // serving because somebody was talking to it.
+        let held = table(&[
+            "   0: 0100007F:1F91 0100007F:9C40 01 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(!listening_in(&held, address("127.0.0.1:8081")));
+    }
+
+    #[test]
+    fn a_listener_on_another_port_is_not_the_one_asked_about() {
+        let held = table(&[
+            "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(!listening_in(&held, address("127.0.0.1:8081")));
+    }
+
+    #[test]
+    fn a_listener_on_another_address_is_not_the_one_asked_about() {
+        // Two frontends on one port and two addresses is ordinary: one
+        // virtual address per service. A reader that matched on the port
+        // alone would call a process serving an address it never bound.
+        let held = table(&[
+            "   0: 0B001CAC:1F91 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(!listening_in(&held, address("172.28.0.12:8081")));
+        assert!(listening_in(&held, address("172.28.0.11:8081")));
+    }
+
+    #[test]
+    fn a_listener_on_every_address_covers_the_one_asked_about() {
+        let held = table(&[
+            "   0: 00000000:1F91 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(listening_in(&held, address("172.28.0.11:8081")));
+    }
+
+    #[test]
+    fn an_ipv6_listener_is_read_word_by_word() {
+        // ::1, which the kernel writes as four words with each one reversed.
+        let held = table(&[
+            "   0: 00000000000000000000000001000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(listening_in(&held, address("[::1]:8081")));
+        assert!(!listening_in(&held, address("[::2]:8081")));
+    }
+
+    #[test]
+    fn an_ipv6_listener_on_every_address_covers_an_ipv4_one() {
+        // A socket on `::` without IPV6_V6ONLY accepts IPv4 as well, and it
+        // appears in the second table only. A reader that skipped it would
+        // wait for ever for a listener that is up.
+        let held = table(&[
+            "   0: 00000000000000000000000000000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1",
+        ]);
+        assert!(listening_in(&held, address("172.28.0.11:8081")));
+    }
+
+    #[test]
+    fn an_empty_table_holds_no_listener() {
+        assert!(!listening_in(&table(&[]), address("127.0.0.1:8081")));
+    }
+
+    /// Runs the check against these addresses and hands back what it watches.
+    fn checking(addresses: Vec<String>) -> (Arc<Status>, tokio::task::JoinHandle<()>) {
+        let status = Arc::new(Status::default());
+        let watched = Arc::clone(&status);
+        let (_sender, shutdown) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            ListeningCheck {
+                addresses,
+                status: watched,
+            }
+            .start(shutdown)
+            .await;
+        });
+        (status, handle)
+    }
+
+    /// Waits for a state, and says which one it saw when it gives up.
+    async fn reaches(status: &Status, wanted: DataPlaneState, patience: Duration) {
+        let deadline = Instant::now() + patience;
+        while Instant::now() < deadline {
+            if status.state() == wanted {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the process reported {:?} rather than {wanted:?}",
+            status.state()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_process_is_not_serving_until_every_listener_is_up() {
+        // The defect this measures was found in the lab: a listener that
+        // could not bind panicked its own thread, the process kept answering
+        // the agent, and this node held the virtual address for a service
+        // that was not there (ADR-0087).
+        let up = TcpListener::bind("127.0.0.1:0").expect("a port should be free");
+        let answering = up.local_addr().expect("the listener has an address");
+
+        // A port nothing listens on. Bound and dropped, so the number is one
+        // the kernel handed out rather than one this test hoped was free.
+        let closed = TcpListener::bind("127.0.0.1:0").expect("a port should be free");
+        let refusing = closed.local_addr().expect("the listener has an address");
+        drop(closed);
+
+        let (status, handle) = checking(vec![answering.to_string(), refusing.to_string()]);
+
+        // One of the two is up, which is not enough.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            status.state(),
+            DataPlaneState::Starting,
+            "the process called itself serving while one of its listeners was \
+             not there"
+        );
+
+        handle.abort();
+        drop(up);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_process_whose_listeners_are_all_up_is_serving() {
+        let first = TcpListener::bind("127.0.0.1:0").expect("a port should be free");
+        let second = TcpListener::bind("127.0.0.1:0").expect("a port should be free");
+        let addresses = vec![
+            first
+                .local_addr()
+                .expect("the listener has an address")
+                .to_string(),
+            second
+                .local_addr()
+                .expect("the listener has an address")
+                .to_string(),
+        ];
+
+        let (status, handle) = checking(addresses);
+        reaches(&status, DataPlaneState::Serving, Duration::from_secs(5)).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_process_with_nothing_to_bind_serves_at_once() {
+        // A configuration with only UDP frontends has no TCP listener to look
+        // for. Waiting for one would leave the claim down for ever.
+        let (status, handle) = checking(Vec::new());
+        reaches(&status, DataPlaneState::Serving, Duration::from_secs(5)).await;
+        handle.abort();
     }
 }

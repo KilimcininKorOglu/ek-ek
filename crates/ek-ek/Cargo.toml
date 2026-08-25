@@ -18,6 +18,9 @@ clap = { workspace = true }
 # function of the configuration, so the command needs the model and nothing
 # else: no cluster, no network and no running agent.
 ek-ek-config = { workspace = true }
+# `node-agent` supervises the traffic path and hosts the virtual router beside
+# it (ADR-0002, ADR-0087).
+ek-ek-agent = { workspace = true }
 ek-ek-dataplane = { workspace = true }
 ek-ek-log = { workspace = true }
 ek-ek-ipc = { workspace = true }

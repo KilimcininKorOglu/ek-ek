@@ -13,3 +13,25 @@
 //! Drop VRRP priority only on node-local faults. Never drop it on a shared
 //! backend failure, because every node would drop together and the VIP would
 //! travel for nothing.
+//!
+//! # Why the two jobs run on separate execution paths
+//!
+//! VRRP and process supervision never share a loop. The T-009 spike measured
+//! what happens when they do: the wait during a process replacement delayed
+//! the heartbeat by half a second, which is longer than the advertisement
+//! interval and would take the address away for a fault that did not happen
+//! (ADR-0087).
+
+pub mod child;
+pub mod run;
+pub mod socket;
+pub mod supervise;
+pub mod vrrp;
+
+pub use child::{Child, TERMINATE_PATIENCE};
+pub use run::{Plan, run};
+pub use socket::{Heard, Listening};
+pub use supervise::{
+    ALARM_AFTER, Effect, FIRST_WAIT, LONGEST_WAIT, Standing, Supervision, serving, wait_after,
+};
+pub use vrrp::{Carrying, Vrrp, carrying};

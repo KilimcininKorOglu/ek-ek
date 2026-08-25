@@ -147,7 +147,8 @@ impl Agent {
         let (heard_sender, heard) = mpsc::unbounded_channel();
         let greeting = std::sync::Arc::new(std::sync::Mutex::new((
             first.generation,
-            encode(&AgentMessage::Config(first.clone())).expect("the delivery must encode"),
+            encode(&AgentMessage::Config(Box::new(first.clone())))
+                .expect("the delivery must encode"),
         )));
 
         let mut agent = Self {
@@ -236,15 +237,33 @@ impl Agent {
         }));
     }
 
+    /// Asks whoever is connected whether it is still answering.
+    pub fn ask(&self, nonce: u64) {
+        let line = encode(&AgentMessage::Ping(ek_ek_ipc::Ping { nonce }))
+            .expect("the question must encode");
+        let _ = self.initial.send(line);
+    }
+
+    /// Waits for the next answer to a liveness question, ignoring the others.
+    pub async fn heard_pong(&mut self) -> ek_ek_ipc::Pong {
+        loop {
+            if let DataPlaneMessage::Pong(pong) = self.heard().await {
+                return pong;
+            }
+        }
+    }
+
     /// Sends a configuration to whoever is connected.
     pub fn push(&self, update: &ConfigUpdate) {
-        let line = encode(&AgentMessage::Config(update.clone())).expect("the delivery must encode");
+        let line = encode(&AgentMessage::Config(Box::new(update.clone())))
+            .expect("the delivery must encode");
         let _ = self.initial.send(line);
     }
 
     /// Changes what a new connection is greeted with.
     pub fn set_greeting(&self, update: &ConfigUpdate) {
-        let line = encode(&AgentMessage::Config(update.clone())).expect("the delivery must encode");
+        let line = encode(&AgentMessage::Config(Box::new(update.clone())))
+            .expect("the delivery must encode");
         if let Ok(mut held) = self.greeting.lock() {
             *held = (update.generation, line);
         }

@@ -415,3 +415,112 @@ fn an_ipv6_vip_produces_an_address_that_can_be_bound() {
     let found = bindings(&config(1)).expect("the frontends resolve");
     assert_eq!(found[0].address, "127.0.0.1:8080");
 }
+
+#[tokio::test]
+async fn a_liveness_question_is_answered_with_the_nonce_it_carried() {
+    // What the agent uses to tell a process that is running from one that is
+    // still answering (ADR-0087). The answer has to carry the same nonce, or
+    // an answer to an earlier question would count for the one outstanding.
+    let socket = socket();
+    let mut agent = Agent::start(&socket.path, &update(1, config(1))).await;
+
+    let link = Arc::new(
+        AgentLink::establish(&socket.path)
+            .await
+            .expect("the agent delivers a config")
+            .with_intervals(QUICK, Duration::from_secs(3600)),
+    );
+    let _stop = spawn(Arc::clone(&link));
+    agent.connected().await;
+
+    agent.ask(41);
+    let answered = agent.heard_pong().await;
+    assert_eq!(answered.nonce, 41, "the answer is for another question");
+
+    // And again, so nothing here works only for the first one. A process that
+    // answered once and then stopped reading would pass a single question.
+    agent.ask(42);
+    assert_eq!(agent.heard_pong().await.nonce, 42);
+}
+
+#[tokio::test]
+async fn a_liveness_question_does_not_disturb_the_configuration_being_served() {
+    // The question travels on the same connection as the configuration. If
+    // answering it consumed a delivery, or counted as one, the agent would be
+    // asking a question that changes what it is asking about.
+    let socket = socket();
+    let mut agent = Agent::start(&socket.path, &update(4, config(2))).await;
+
+    let link = Arc::new(
+        AgentLink::establish(&socket.path)
+            .await
+            .expect("the agent delivers a config")
+            .with_intervals(QUICK, Duration::from_secs(3600)),
+    );
+    let applied = link.status().counters().configs_applied;
+    let _stop = spawn(Arc::clone(&link));
+    agent.connected().await;
+
+    agent.ask(9);
+    assert_eq!(agent.heard_pong().await.nonce, 9);
+
+    assert_eq!(
+        link.live().generation(),
+        4,
+        "answering a question changed which configuration is live"
+    );
+    assert_eq!(
+        link.status().counters().configs_applied,
+        applied,
+        "a liveness question was counted as a configuration"
+    );
+    assert_eq!(
+        link.status().counters().configs_rejected,
+        0,
+        "a liveness question was counted as a refused configuration"
+    );
+
+    // The link still takes a real delivery afterwards, which is what says the
+    // connection was not left in a state that only answers questions.
+    agent.push(&update(5, config(3)));
+    assert!(
+        until(|| link.live().generation() == 5).await,
+        "a delivery after a liveness question never landed"
+    );
+}
+
+#[tokio::test]
+async fn a_state_change_is_reported_without_waiting_for_the_next_interval() {
+    // The agent puts this node's claim back on a report that says serving and
+    // on nothing else (ADR-0087). A report that waited for the interval would
+    // leave a healthy node without its address for that long after every
+    // restart.
+    let socket = socket();
+    let mut agent = Agent::start(&socket.path, &update(4, config(1))).await;
+
+    let link = Arc::new(
+        AgentLink::establish(&socket.path)
+            .await
+            .expect("the agent delivers")
+            // A status interval far longer than this measurement waits, so
+            // what arrives arrived because the state changed.
+            .with_intervals(QUICK, Duration::from_secs(600)),
+    );
+    let _stop = spawn(Arc::clone(&link));
+
+    let first = agent.heard_status().await;
+    assert_eq!(
+        first.state,
+        DataPlaneState::Starting,
+        "the process called itself serving before its listeners answered"
+    );
+
+    link.status().set_state(DataPlaneState::Serving);
+    let next = agent.heard_status().await;
+    assert_eq!(
+        next.state,
+        DataPlaneState::Serving,
+        "the state changed and the agent was told one interval later, so this \
+         node had no address for that long"
+    );
+}

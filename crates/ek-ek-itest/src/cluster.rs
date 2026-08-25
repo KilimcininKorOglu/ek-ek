@@ -25,6 +25,9 @@ pub const MAIL_PROXIED_PORT: u16 = 25;
 pub const MAIL_PLAIN_PORT: u16 = 26;
 /// The ACME test server the certificate measurements order from.
 const PEBBLE: (&str, u8) = ("pebble", 41);
+/// The container running systemd as PID 1, for the one measurement that needs
+/// a real init and a real unit file.
+const SYSTEMD: (&str, u8) = ("systemd", 51);
 /// Where the ACME server publishes its directory document.
 pub const PEBBLE_DIRECTORY: &str = "https://pebble:14000/dir";
 /// The authority inside the ACME server's image that signs its own HTTPS
@@ -58,6 +61,8 @@ const BUILDERS: usize = 1;
 const LAB_PREFIX: [u8; 3] = [172, 28, 0];
 /// Where a binary installed by the harness lands inside a node.
 const INSTALL_DIR: &str = "/var/lib/ek-ek";
+/// Where the systemd container reads its binaries from.
+const SYSTEMD_DIR: &str = "/opt/ek-ek";
 
 /// The cluster, brought up and cleaned for one test.
 ///
@@ -158,6 +163,43 @@ impl Cluster {
             .find(|(service, _)| *service == name)
             .map(|(_, host)| lab_address(*host))
             .ok_or_else(|| Error::new(format!("no backend named {name}")))
+    }
+
+    /// The container running systemd as PID 1.
+    ///
+    /// One measurement uses it: whether the supervision runs under a real
+    /// unit, as a non-root user, with the capabilities granted ambiently
+    /// (ADR-0012, ADR-0087). Nothing else in this lab can answer that, because
+    /// every other container has no init but Docker's and runs as root.
+    pub fn systemd(&self) -> Node {
+        Node::new(SYSTEMD.0, lab_address(SYSTEMD.1))
+    }
+
+    /// Puts a workspace binary where the systemd container can run it.
+    ///
+    /// A separate mount from the nodes', because that container is not one of
+    /// them: it carries no lab addresses and takes part in no cluster.
+    /// Returns the path the unit runs it from.
+    pub fn install_binary_for_systemd(&self, package: &str, bin: &str) -> Result<String> {
+        build_in_container(package, bin)?;
+
+        let built = repo_root()
+            .join("docker-data/builder-target/release")
+            .join(bin);
+        if !built.is_file() {
+            return Err(Error::new(format!(
+                "{} was not produced by the builder",
+                built.display()
+            )));
+        }
+        ensure_host_owned(&built)?;
+        let target = repo_root().join("docker-data/systemd").join(bin);
+        std::fs::create_dir_all(repo_root().join("docker-data/systemd"))
+            .map_err(|e| Error::new(format!("cannot make the systemd directory: {e}")))?;
+        std::fs::copy(&built, &target)
+            .map_err(|e| Error::new(format!("cannot place {bin} for systemd: {e}")))?;
+        set_executable(&target)?;
+        Ok(format!("{SYSTEMD_DIR}/{bin}"))
     }
 
     /// Address of the real SMTP server on the lab network.

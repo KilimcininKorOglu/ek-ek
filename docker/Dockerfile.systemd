@@ -1,0 +1,44 @@
+# A container running systemd as PID 1, for measuring the unit this product
+# ships under.
+#
+# The rest of the lab has no init but Docker's own (ADR-0012), which is enough
+# for everything except one question: does the supervision work when systemd
+# starts it, as a non-root user, with the capabilities granted ambiently rather
+# than inherited from root? That question cannot be answered anywhere else in
+# this lab, and leaving it to the first real installation would mean building
+# four milestones on an assumption nobody measured.
+#
+# This image is for that one measurement. Nothing else uses it.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        dbus \
+        iproute2 \
+        libcap2-bin \
+        procps \
+        systemd \
+        systemd-sysv \
+    && rm -rf /var/lib/apt/lists/*
+
+# systemd in a container brings up units that ask for things a container does
+# not have. Masking them keeps the boot to what is being measured.
+RUN systemctl mask \
+        systemd-firstboot.service \
+        systemd-udevd.service \
+        systemd-udev-trigger.service \
+        systemd-modules-load.service \
+        systemd-journald-audit.socket \
+        sys-kernel-config.mount \
+        sys-kernel-debug.mount \
+        sys-fs-fuse-connections.mount
+
+# The service user. Non-root on purpose: the whole point of the measurement is
+# that the capabilities are granted to a user who does not otherwise have them.
+RUN useradd --system --create-home --home-dir /var/lib/ek-ek --shell /usr/sbin/nologin ek-ek
+
+STOPSIGNAL SIGRTMIN+3
+
+CMD ["/sbin/init"]

@@ -56,5 +56,7 @@ pub use proxy::{Proxy, upstream};
 pub use proxyproto::{Header, header, unknown};
 pub use requestid::{acceptable, for_request};
 pub use route::{Decision, decide, host_matches, normalise, path_matches};
-pub use server::{Binding, DrainCount, ListenerKind, bindings, build, shutdown_conf};
+pub use server::{
+    Binding, DrainCount, ListenerKind, bindings, build, end_on_a_panic, shutdown_conf,
+};
 pub use stream::{StreamProxy, announce};

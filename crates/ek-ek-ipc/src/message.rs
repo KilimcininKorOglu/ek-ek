@@ -11,11 +11,17 @@ use ek_ek_config::{CertificateId, Config};
 use serde::{Deserialize, Serialize};
 
 /// Anything `node-agent` sends to `data-plane`.
+///
+/// The configuration is boxed. A whole configuration is hundreds of times the
+/// size of a liveness question, and without the box every question on the
+/// wire would carry that much stack with it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "message")]
 pub enum AgentMessage {
     /// The configuration to serve from now on.
-    Config(ConfigUpdate),
+    Config(Box<ConfigUpdate>),
+    /// Are you still answering?
+    Ping(Ping),
 }
 
 /// Anything `data-plane` sends to `node-agent`.
@@ -28,6 +34,36 @@ pub enum DataPlaneMessage {
     Status(StatusReport),
     /// Sent when a delivered configuration was not applied.
     ConfigRejected(ConfigRejection),
+    /// The answer to one [`Ping`].
+    Pong(Pong),
+}
+
+/// One liveness question.
+///
+/// A process that is running is not the same as a process that is answering.
+/// A crashed thread, a deadlock or a runtime that has stopped polling all
+/// leave the process in the table while nothing it does reaches anybody, and
+/// the agent has to treat that as a crash (ADR-0033, ADR-0087).
+///
+/// The status report on its own does not answer this. It says the link task
+/// is alive, which can be true while the proxy accepts nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ping {
+    /// Tells one question from the next.
+    ///
+    /// Without it a late answer to an earlier question would count as the
+    /// answer to the one still outstanding, and a process that had already
+    /// stopped answering would look alive for one more round.
+    pub nonce: u64,
+}
+
+/// The answer to one [`Ping`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pong {
+    /// The nonce of the question being answered.
+    pub nonce: u64,
 }
 
 /// The first thing `data-plane` says.

@@ -53,6 +53,15 @@ RULES = [
     # a Raft message is would put the state machine below the transport.
     ("ek-ek-peer", "ek-ek-raft", "the channel must not know what it carries"),
     ("ek-ek-store", "ek-ek-raft", "the store is measured without consensus anywhere near it"),
+    # The agent starts the traffic path as a process and speaks to it over a
+    # socket (ADR-0002). Linking it would put the proxy inside the process that
+    # is supposed to survive the proxy crashing, which is the whole point of
+    # there being two of them (ADR-0087).
+    ("ek-ek-agent", "ek-ek-dataplane", "the supervisor must not link what it supervises"),
+    # Supervision and consensus are separate jobs on separate schedules. An
+    # agent that waited on a quorum to notice a dead traffic path would hold
+    # this node's address through a quorum loss (ADR-0004).
+    ("ek-ek-agent", "ek-ek-raft", "supervising a process must not wait on a quorum"),
 ]
 
 # Crates that must depend on no workspace crate at all.

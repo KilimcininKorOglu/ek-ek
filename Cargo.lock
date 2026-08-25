@@ -790,6 +790,7 @@ name = "ek-ek"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ek-ek-agent",
  "ek-ek-config",
  "ek-ek-dataplane",
  "ek-ek-ipc",
@@ -810,6 +811,13 @@ dependencies = [
 [[package]]
 name = "ek-ek-agent"
 version = "0.1.0"
+dependencies = [
+ "ek-ek-config",
+ "ek-ek-ipc",
+ "ek-ek-vrrp",
+ "libc",
+ "serde_json",
+]
 
 [[package]]
 name = "ek-ek-api"

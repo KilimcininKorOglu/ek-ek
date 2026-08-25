@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use ek_ek_config::{Config, SchemaVersion};
 use ek_ek_ipc::{
     AgentMessage, ConfigUpdate, Counters, DataPlaneMessage, DataPlaneState, Hello, MemberHealth,
-    OpenConnections, StatusReport, UdpSessions, decode, encode,
+    OpenConnections, Ping, Pong, StatusReport, UdpSessions, decode, encode,
 };
 
 fn empty_config() -> Config {
@@ -35,12 +35,12 @@ fn empty_config() -> Config {
 
 #[test]
 fn a_message_survives_a_round_trip() {
-    let delivery = AgentMessage::Config(ConfigUpdate {
+    let delivery = AgentMessage::Config(Box::new(ConfigUpdate {
         generation: 12,
         config: empty_config(),
         certificates: BTreeMap::new(),
         challenges: BTreeMap::new(),
-    });
+    }));
     let line = encode(&delivery).expect("it must encode");
     assert_eq!(
         decode::<AgentMessage>(&line).expect("it must decode"),
@@ -123,12 +123,12 @@ fn a_message_from_a_newer_release_is_refused_by_name() {
 
     // A message this release does know still decodes, so the refusal is about
     // the tag and not about every message.
-    let known = encode(&AgentMessage::Config(ConfigUpdate {
+    let known = encode(&AgentMessage::Config(Box::new(ConfigUpdate {
         generation: 1,
         config: empty_config(),
         certificates: BTreeMap::new(),
         challenges: BTreeMap::new(),
-    }))
+    })))
     .expect("it must encode");
     decode::<AgentMessage>(&known).expect("a known message decodes");
 }
@@ -172,5 +172,67 @@ fn a_trailing_newline_is_optional_when_reading() {
         decode::<DataPlaneMessage>(trimmed).expect("it must decode"),
         decode::<DataPlaneMessage>(&line).expect("it must decode"),
         "a reader that already stripped the newline gets the same value"
+    );
+}
+
+#[test]
+fn a_liveness_question_carries_the_nonce_its_answer_has_to_repeat() {
+    // The nonce is what tells one question from the next. Without it a late
+    // answer to an earlier question counts as the answer to the one still
+    // outstanding, and a process that stopped answering looks alive for one
+    // more round (ADR-0087).
+    let asked = AgentMessage::Ping(Ping { nonce: 7 });
+    let line = encode(&asked).expect("the question is written out");
+    let read: AgentMessage = decode(&line).expect("the question is read back");
+    assert_eq!(read, asked);
+
+    let answered = DataPlaneMessage::Pong(Pong { nonce: 7 });
+    let line = encode(&answered).expect("the answer is written out");
+    let read: DataPlaneMessage = decode(&line).expect("the answer is read back");
+    assert_eq!(read, answered);
+
+    // Two questions are told apart, which is the whole point of the field.
+    let other = encode(&AgentMessage::Ping(Ping { nonce: 8 })).expect("written out");
+    assert_ne!(
+        other,
+        encode(&asked).expect("written out"),
+        "two questions encode the same, so an answer cannot say which it is for"
+    );
+}
+
+#[test]
+fn an_answer_carrying_no_nonce_is_refused_rather_than_read_as_zero() {
+    // A release that answered without saying which question it was answering
+    // would be read as answering nonce zero, which is a question the agent
+    // may well have asked. Refusing by name is what keeps that from counting
+    // as a live process.
+    let refused: ek_ek_ipc::Result<DataPlaneMessage> = decode(r#"{"message":"pong"}"#);
+    assert!(
+        refused.is_err(),
+        "an answer with no nonce was accepted: {refused:?}"
+    );
+
+    let refused: ek_ek_ipc::Result<AgentMessage> = decode(r#"{"message":"ping"}"#);
+    assert!(
+        refused.is_err(),
+        "a question with no nonce was accepted: {refused:?}"
+    );
+}
+
+#[test]
+fn a_question_is_not_read_as_an_answer() {
+    // Both directions carry the same field under the same name, so only the
+    // tag tells them apart. A question read as an answer would make the agent
+    // count its own message as proof the other process is alive.
+    let asked = encode(&AgentMessage::Ping(Ping { nonce: 3 })).expect("written out");
+    assert!(
+        decode::<DataPlaneMessage>(&asked).is_err(),
+        "the agent's own question reads as the traffic path's answer"
+    );
+
+    let answered = encode(&DataPlaneMessage::Pong(Pong { nonce: 3 })).expect("written out");
+    assert!(
+        decode::<AgentMessage>(&answered).is_err(),
+        "the traffic path's answer reads as a question from the agent"
     );
 }

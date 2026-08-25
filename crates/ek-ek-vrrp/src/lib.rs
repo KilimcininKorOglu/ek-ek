@@ -35,6 +35,8 @@ pub mod packet;
 pub mod ping;
 pub mod route;
 #[cfg(target_os = "linux")]
+pub mod router;
+#[cfg(target_os = "linux")]
 pub mod socket;
 pub mod state;
 pub mod transport;
@@ -50,6 +52,8 @@ pub use packet::{ADVERTISEMENT, Advertisement, GIVING_UP, Malformed, PROTOCOL, V
 #[cfg(target_os = "linux")]
 pub use ping::Pinger;
 pub use route::Route;
+#[cfg(target_os = "linux")]
+pub use router::{Plan, Router};
 #[cfg(target_os = "linux")]
 pub use socket::RawSocket;
 pub use state::{Action, Ignored, Machine, Reason, Settings, State, Transition};

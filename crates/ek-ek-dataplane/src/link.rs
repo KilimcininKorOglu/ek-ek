@@ -33,6 +33,15 @@ pub const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 /// How often a status report goes out.
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often the state is looked at, so a change is reported without waiting
+/// for the next [`STATUS_INTERVAL`].
+///
+/// The agent puts this node's claim back on a report that says serving and on
+/// nothing else (ADR-0087). Waiting a whole interval for that report would
+/// leave a healthy node without its address for five seconds after every
+/// restart.
+pub const STATE_POLL: Duration = Duration::from_millis(100);
+
 /// How long the first exchange with the agent may take.
 ///
 /// The agent is a local process handing over a document it already holds, so
@@ -180,8 +189,23 @@ impl AgentLink {
         // soon as the link is up rather than one interval later.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        let mut watching = tokio::time::interval(STATE_POLL);
+        watching.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Seeded rather than empty, so the first report is the one the
+        // ticker sends. Both fire at once otherwise and the agent gets the
+        // same report twice on every connection.
+        let mut said: Option<ek_ek_ipc::DataPlaneState> = Some(self.status.state());
+
         loop {
             tokio::select! {
+                _ = watching.tick() => {
+                    let state = self.status.state();
+                    if said != Some(state) {
+                        said = Some(state);
+                        let report = self.status.report(self.live.generation());
+                        write(&mut writer, &DataPlaneMessage::Status(report)).await?;
+                    }
+                }
                 line = lines.next_line() => {
                     let line = line.map_err(|error| {
                         Error::new(ErrorKind::AgentGone, format!("the link failed: {error}"))
@@ -196,6 +220,7 @@ impl AgentLink {
                 }
                 _ = ticker.tick() => {
                     let report = self.status.report(self.live.generation());
+                    said = Some(report.state);
                     write(&mut writer, &DataPlaneMessage::Status(report)).await?;
                 }
                 _ = stop.changed() => return Ok(()),
@@ -215,7 +240,20 @@ impl AgentLink {
             )
         })?;
 
-        let AgentMessage::Config(update) = message;
+        let update = match message {
+            AgentMessage::Config(update) => *update,
+            // Answered here rather than on a timer, because what the agent is
+            // asking is whether this process still reads what is sent to it.
+            // An answer produced anywhere else would say something narrower
+            // (ADR-0087).
+            AgentMessage::Ping(ping) => {
+                return write(
+                    writer,
+                    &DataPlaneMessage::Pong(ek_ek_ipc::Pong { nonce: ping.nonce }),
+                )
+                .await;
+            }
+        };
         let generation = update.generation;
 
         match self.live.apply(update) {
@@ -295,8 +333,19 @@ async fn read_first_config(stream: &mut UnixStream) -> Result<ConfigUpdate> {
             format!("the first delivery was unreadable: {error}"),
         )
     })?;
-    let AgentMessage::Config(update) = message;
-    Ok(update)
+    // A liveness question here is not one this process can answer yet: it has
+    // no configuration, so it is not serving, and saying it is would tell the
+    // agent the traffic path is up before it is. The start stops instead, and
+    // the agent restarts it (ADR-0087).
+    let AgentMessage::Config(update) = message else {
+        return Err(Error::new(
+            ErrorKind::Protocol,
+            "the agent asked whether this process was answering before it sent \
+             a configuration, so there is nothing to serve"
+                .to_owned(),
+        ));
+    };
+    Ok(*update)
 }
 
 async fn write(
