@@ -61,6 +61,7 @@ pub mod journal;
 pub mod master_key;
 pub mod membership;
 pub mod migration;
+pub mod order;
 pub mod secret;
 pub mod sqlite;
 pub mod store;
@@ -76,6 +77,7 @@ pub use membership::{JoinRecord, Removed, TokenId};
 pub use migration::{
     MIGRATIONS, Migration, document_version, migrate_document, migrate_into_config, target_version,
 };
+pub use order::{OrderChallenge, OrderRecord, Orders};
 pub use secret::Secret;
 pub use sqlite::{DATABASE_FILE, DEFAULT_DATA_DIRECTORY, SqliteStore};
 pub use store::{Snapshot, Store};

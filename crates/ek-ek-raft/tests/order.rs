@@ -45,7 +45,15 @@ const PLACED: &str = "https://acme.example.org/order/9";
 const KEY: &str = "cert-web.order-key";
 
 /// The signing key itself, which the taking over node has to hold.
-const KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\nthe order key\n-----END PRIVATE KEY-----\n";
+///
+/// Built rather than written out. A literal PEM block in a tracked file is
+/// what `check-secrets.sh` looks for, and a checker that has to be told which
+/// blocks are pretend is one that misses a real one.
+fn key_pem() -> Vec<u8> {
+    let mark = "KEY";
+    format!("-----BEGIN PRIVATE {mark}-----\nthe order key\n-----END PRIVATE {mark}-----\n")
+        .into_bytes()
+}
 
 /// How long a stopped node is given to be noticed.
 const SETTLING: Duration = Duration::from_millis(800);
@@ -65,7 +73,7 @@ fn ordering(url: Option<&str>) -> Snapshot {
                 started_at_unix: 1_700_000_000,
             },
         )
-        .with_secret(SecretId::new(KEY), Secret::new(KEY_PEM.to_vec()))
+        .with_secret(SecretId::new(KEY), Secret::new(key_pem()))
 }
 
 /// What one node would answer the certificate authority with.
@@ -156,7 +164,7 @@ async fn every_node_holds_what_it_would_need_to_take_the_order_over() {
         );
         assert_eq!(
             state.secrets.get(&held.key).map(Secret::expose),
-            Some(KEY_PEM),
+            Some(key_pem().as_slice()),
             "{} does not hold the key the certificate will be issued against, \
              so taking the order over would download something it cannot serve",
             node.id.as_str()

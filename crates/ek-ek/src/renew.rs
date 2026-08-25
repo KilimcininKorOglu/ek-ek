@@ -262,7 +262,7 @@ fn warn(config: &Config, at: i64) {
 }
 
 /// Where the attempt state is kept.
-fn state_path(data_dir: &str) -> PathBuf {
+pub(crate) fn state_path(data_dir: &str) -> PathBuf {
     Path::new(data_dir).join(STATE_FILE)
 }
 
@@ -271,7 +271,7 @@ fn state_path(data_dir: &str) -> PathBuf {
 /// A file that cannot be parsed is a failure rather than an empty state. A
 /// state silently thrown away is a backoff that starts over, which is exactly
 /// what the ACME server's allowance cannot afford.
-fn read_state(path: &Path) -> Result<BTreeMap<CertificateId, Attempts>, Failure> {
+pub(crate) fn read_state(path: &Path) -> Result<BTreeMap<CertificateId, Attempts>, Failure> {
     let document = match std::fs::read_to_string(path) {
         Ok(document) => document,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -291,7 +291,10 @@ fn read_state(path: &Path) -> Result<BTreeMap<CertificateId, Attempts>, Failure>
 }
 
 /// Writes the attempt state back.
-fn write_state(path: &Path, state: &BTreeMap<CertificateId, Attempts>) -> Result<(), Failure> {
+pub(crate) fn write_state(
+    path: &Path,
+    state: &BTreeMap<CertificateId, Attempts>,
+) -> Result<(), Failure> {
     let document = serde_json::to_string(state).map_err(|error| {
         Failure::new(
             Reason::Protocol,

@@ -64,6 +64,6 @@ pub use token::{
     FORMAT, ID_CHARACTERS, LIFETIME_SECONDS, SECRET_CHARACTERS, Token, digest, presented,
 };
 pub use types::{
-    NodeNumber, PeerNode, TypeConfig, WireAudit, WireChange, WireSnapshot, WireState, WireVersion,
-    WriteRequest, WriteResponse,
+    NodeNumber, PeerNode, TypeConfig, WireAudit, WireChallenge, WireChange, WireOrder,
+    WireSnapshot, WireState, WireVersion, WriteRequest, WriteResponse,
 };

@@ -535,7 +535,10 @@ fn holds_certificate(node: &Node, product: &str) -> bool {
     let Ok(said) = node.run_ok(&[product, "cluster", "status", "--data-dir", STORE]) else {
         return false;
     };
-    let Some(line) = said.lines().find(|line| line.contains(r#""event":"status""#)) else {
+    let Some(line) = said
+        .lines()
+        .find(|line| line.contains(r#""event":"status""#))
+    else {
         return false;
     };
     let held: serde_json::Value =
@@ -731,12 +734,12 @@ fn one_node_orders_and_every_node_answers_the_certificate_authority() {
     // The certificate is usable on every node, not only on the one that
     // ordered it. A virtual address that moves must not move a certificate.
     wait_while("the certificate never reached every node", || {
-        NAMES
-            .iter()
-            .all(|name| holds_certificate(
+        NAMES.iter().all(|name| {
+            holds_certificate(
                 cluster.node(name).expect("the node is in the cluster"),
                 &product,
-            ))
+            )
+        })
     });
 
     // And the path is closed again, everywhere. A token left answerable is an
@@ -916,9 +919,9 @@ fn an_order_whose_leader_stopped_is_taken_over_rather_than_lost() {
         || {
             [survivor, ANSWERING].iter().all(|name| {
                 holds_certificate(
-                cluster.node(name).expect("the node is in the cluster"),
-                &product,
-            )
+                    cluster.node(name).expect("the node is in the cluster"),
+                    &product,
+                )
             })
         },
     );

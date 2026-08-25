@@ -73,14 +73,49 @@ impl std::fmt::Debug for Obtained {
     }
 }
 
-/// Publishes the challenge answers the server is about to ask for.
+/// What an order has reached that has to outlive the process driving it.
 ///
-/// Called with an empty map when the order ends, whether it succeeded or not,
-/// so the path never stays open past the order it was opened for.
-pub type Publish<'a> = &'a mut dyn FnMut(&Publication) -> Result<(), Failure>;
+/// Two things, reported together because they become durable at the same
+/// points and a caller that wrote one without the other would leave an order
+/// nobody can finish. The URL is what another node takes the order over at,
+/// and the publication is what every node has to answer while the server
+/// checks (ADR-0086).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reached {
+    /// The URL the certificate authority named the order with, once it has.
+    pub order_url: Option<String>,
+    /// What has to be reachable right now.
+    pub publication: Publication,
+}
+
+/// Records what an order has reached, and publishes its challenge answers.
+///
+/// Called whenever either half changes, and with an empty publication when the
+/// order ends, whether it succeeded or not, so the path never stays open past
+/// the order it was opened for.
+pub type Record<'a> = &'a mut dyn FnMut(&Reached) -> Result<(), Failure>;
 
 /// Waits, for as long as it is told to.
 pub type Pause<'a> = &'a mut dyn FnMut(Duration);
+
+/// How one order is driven.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Plan<'a> {
+    /// The key the certificate is issued against, when the caller pins one.
+    ///
+    /// `None` generates a fresh key for every attempt, which is what a single
+    /// node wants: a key that took part in a failed exchange never serves. A
+    /// cluster pins one, because whichever node finishes the order has to hold
+    /// the key the certificate belongs to, and it drops the key with the order
+    /// (ADR-0086).
+    pub key: Option<&'a PKey<Private>>,
+    /// An order the server already named, to be taken over rather than placed.
+    ///
+    /// Only the first attempt takes it over. A retry places a fresh order,
+    /// because an order that failed in a way worth retrying is not one to keep
+    /// reading.
+    pub resume: Option<&'a str>,
+}
 
 /// Obtains a certificate, trying again when the fault might pass.
 ///
@@ -97,7 +132,7 @@ pub fn obtain(
     account: &PKey<Private>,
     names: &[String],
     kind: Challenge,
-    publish: Publish<'_>,
+    record: Record<'_>,
     pause: Pause<'_>,
 ) -> Result<Obtained, Failure> {
     let mut transport = https(settings)?;
@@ -107,7 +142,7 @@ pub fn obtain(
         names,
         kind,
         &mut transport,
-        publish,
+        record,
         pause,
     )
 }
@@ -123,7 +158,63 @@ pub fn obtain_over(
     names: &[String],
     kind: Challenge,
     transport: &mut dyn Transport,
-    publish: Publish<'_>,
+    record: Record<'_>,
+    pause: Pause<'_>,
+) -> Result<Obtained, Failure> {
+    obtain_planned_over(
+        settings,
+        account,
+        names,
+        kind,
+        Plan::default(),
+        transport,
+        record,
+        pause,
+    )
+}
+
+/// Obtains a certificate the way the plan says, over HTTPS.
+///
+/// # Errors
+///
+/// The same as [`obtain`].
+pub fn obtain_planned(
+    settings: &AcmeSettings,
+    account: &PKey<Private>,
+    names: &[String],
+    kind: Challenge,
+    plan: Plan<'_>,
+    record: Record<'_>,
+    pause: Pause<'_>,
+) -> Result<Obtained, Failure> {
+    let mut transport = https(settings)?;
+    obtain_planned_over(
+        settings,
+        account,
+        names,
+        kind,
+        plan,
+        &mut transport,
+        record,
+        pause,
+    )
+}
+
+/// Obtains a certificate the way the plan says, over a transport somebody else
+/// built.
+///
+/// # Errors
+///
+/// The same as [`obtain`].
+#[allow(clippy::too_many_arguments)]
+pub fn obtain_planned_over(
+    settings: &AcmeSettings,
+    account: &PKey<Private>,
+    names: &[String],
+    kind: Challenge,
+    plan: Plan<'_>,
+    transport: &mut dyn Transport,
+    record: Record<'_>,
     pause: Pause<'_>,
 ) -> Result<Obtained, Failure> {
     let thumbprint = crate::jws::thumbprint(account)?;
@@ -141,20 +232,38 @@ pub fn obtain_over(
             pause(wait);
         }
 
-        // A fresh signing request per attempt. Reusing one would hand the same
-        // key to a server that already refused the order, and a key that took
-        // part in a failed exchange is not one to keep serving.
-        let request = csr::request(names)?;
-        let mut flow = Flow::new(
-            &settings.directory_url,
-            names.to_vec(),
-            &thumbprint,
-            &settings.contact_email,
-            request.encoded(),
-            kind,
-        );
+        // A fresh signing request per attempt, unless the caller pinned a key.
+        // Generating one would hand the same key to a server that already
+        // refused the order, and a key that took part in a failed exchange is
+        // not one to keep serving. A pinned key belongs to one order and is
+        // dropped with it, which is the same rule reached another way.
+        let request = match plan.key {
+            Some(key) => csr::request_with(names, key.clone())?,
+            None => csr::request(names)?,
+        };
+        // Only the first attempt takes an order over. A retry places a fresh
+        // one, because an order that failed is not one to keep reading.
+        let mut flow = match plan.resume.filter(|_| attempt == 1) {
+            Some(url) => Flow::resume(
+                &settings.directory_url,
+                names.to_vec(),
+                &thumbprint,
+                &settings.contact_email,
+                request.encoded(),
+                kind,
+                url,
+            ),
+            None => Flow::new(
+                &settings.directory_url,
+                names.to_vec(),
+                &thumbprint,
+                &settings.contact_email,
+                request.encoded(),
+                kind,
+            ),
+        };
 
-        match run(&mut flow, account, transport, &mut *publish, &mut *pause) {
+        match run(&mut flow, account, transport, &mut *record, &mut *pause) {
             Ok(chain) => {
                 log::info!("acme: {} obtained on attempt {attempt}", names.join(", "));
                 return Ok(Obtained {
@@ -201,16 +310,25 @@ pub fn run(
     flow: &mut Flow,
     account: &PKey<Private>,
     transport: &mut dyn Transport,
-    publish: Publish<'_>,
+    record: Record<'_>,
     pause: Pause<'_>,
 ) -> Result<String, Failure> {
     let mut nonce: Option<String> = None;
-    let mut live = Publication::default();
+    // What the flow already reached before the first ask. For a fresh order
+    // that is nothing; for one being taken over it is the URL the previous
+    // node wrote down. Starting from it is what keeps a take-over from
+    // withdrawing the answer that is already published and putting the same
+    // one back, which would close the challenge path for a round trip while
+    // the certificate authority is checking it (ADR-0086).
+    let mut live = Reached {
+        order_url: flow.order_url().map(str::to_owned),
+        publication: flow.published().clone(),
+    };
     let outcome = drive(
         flow,
         account,
         transport,
-        &mut *publish,
+        &mut *record,
         pause,
         &mut nonce,
         &mut live,
@@ -219,15 +337,20 @@ pub fn run(
     // Whatever happened, the path closes. A failed attempt that left a token
     // answerable would leave an endpoint open on a name nobody is watching.
     flow.abandon();
-    let closed = if live.is_empty() {
+    let closed = if live.publication.is_empty() {
         Ok(())
     } else {
         // The kind is kept, because taking a publication away means reaching
         // the same place it was put: a name server for one, a listener for
-        // the other.
-        publish(&Publication {
-            kind: live.kind,
-            entries: std::collections::BTreeMap::new(),
+        // the other. The order URL is kept too: an attempt that failed while
+        // the certificate was still to be collected is one another node can
+        // take over, and a caller that dropped the URL here could not.
+        record(&Reached {
+            order_url: live.order_url.clone(),
+            publication: Publication {
+                kind: live.publication.kind,
+                entries: std::collections::BTreeMap::new(),
+            },
         })
     };
 
@@ -249,23 +372,30 @@ fn drive(
     flow: &mut Flow,
     account: &PKey<Private>,
     transport: &mut dyn Transport,
-    publish: Publish<'_>,
+    record: Record<'_>,
     pause: Pause<'_>,
     nonce: &mut Option<String>,
-    live: &mut Publication,
+    live: &mut Reached,
 ) -> Result<String, Failure> {
     let mut rejected = 0_u32;
 
     while let Some(ask) = flow.next() {
-        // Published before the ask goes out, because the ask that follows a
-        // new token is the one telling the server to come and read it.
-        if flow.published() != &*live {
+        // Recorded before the ask goes out, for two reasons that meet here.
+        // The ask that follows a new token is the one telling the server to
+        // come and read it, so the answer has to be reachable first. And the
+        // ask that follows a placed order is the one that can be lost, so the
+        // URL has to be somewhere another node can find it first (ADR-0086).
+        let reached = Reached {
+            order_url: flow.order_url().map(str::to_owned),
+            publication: flow.published().clone(),
+        };
+        if reached != *live {
             // Recorded before the attempt rather than after it. A publisher
             // that put the answer in place and then failed on the step after
             // has still left something behind, and a cleanup that only knows
             // about publications that succeeded would walk past it.
-            live.clone_from(flow.published());
-            publish(&*live)?;
+            live.clone_from(&reached);
+            record(&*live)?;
         }
 
         if flow.waiting_on_server() {

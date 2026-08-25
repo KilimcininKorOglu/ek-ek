@@ -18,6 +18,7 @@ use ek_ek_config::{Config, NodeId, SecretId};
 use crate::cluster::ClusterIdentity;
 use crate::error::Result;
 use crate::membership::{JoinRecord, Removed, TokenId};
+use crate::order::{OrderRecord, Orders};
 use crate::secret::Secret;
 use crate::version::{Change, VersionId};
 
@@ -54,6 +55,14 @@ pub struct Snapshot {
     /// the same list, which is what keeps one node from quietly readmitting a
     /// caller the others refuse (ADR-0084).
     pub removed: Removed,
+    /// Certificate orders this cluster is running, by the certificate.
+    ///
+    /// Here for the same reason as everything above it: an operator writes
+    /// none of it, and a rollback must not resurrect an order that finished.
+    /// Every node holds it because every node has to answer the challenge, and
+    /// because a node taking a half finished order over needs its URL and its
+    /// signing key (ADR-0032, ADR-0086).
+    pub orders: Orders,
 }
 
 impl Snapshot {
@@ -66,7 +75,15 @@ impl Snapshot {
             cluster: None,
             joins: BTreeMap::new(),
             removed: Removed::new(),
+            orders: Orders::new(),
         }
+    }
+
+    /// Adds a running order.
+    #[must_use]
+    pub fn with_order(mut self, id: ek_ek_config::CertificateId, record: OrderRecord) -> Self {
+        self.orders.insert(id, record);
+        self
     }
 
     /// Adds a join token.

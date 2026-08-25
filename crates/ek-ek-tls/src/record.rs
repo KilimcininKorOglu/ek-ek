@@ -31,6 +31,20 @@ pub fn key_id(certificate: &CertificateId) -> SecretId {
     SecretId::new(format!("{}{KEY_SUFFIX}", certificate.as_str()))
 }
 
+/// The suffix the key of a running order is filed under.
+pub const ORDER_KEY_SUFFIX: &str = ".order-key";
+
+/// The identity the signing key of a running order is stored under.
+///
+/// Separate from [`key_id`] on purpose. The order key is written before the
+/// certificate authority is asked anything, so filing it under the serving
+/// identity would replace the key of the certificate currently being served
+/// with one no certificate belongs to yet (ADR-0086).
+#[must_use]
+pub fn order_key_id(certificate: &CertificateId) -> SecretId {
+    SecretId::new(format!("{}{ORDER_KEY_SUFFIX}", certificate.as_str()))
+}
+
 /// Puts an upload into a state, replacing any certificate of the same name.
 ///
 /// Derived identities rather than fresh ones: uploading a replacement writes

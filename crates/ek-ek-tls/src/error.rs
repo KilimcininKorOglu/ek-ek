@@ -32,19 +32,28 @@ pub enum Reason {
     Crypto,
     /// The configuration cannot support an order at all.
     Configuration,
+    /// The cluster could not agree, so nothing was written and no order was
+    /// placed.
+    ///
+    /// Here rather than folded into [`Self::Network`] because it says
+    /// something different to an operator: the certificate authority is fine
+    /// and the cluster is not. Nothing was sent anywhere, so no allowance was
+    /// spent (ADR-0086).
+    NoQuorum,
     /// The order failed and the attempt limit is used up.
     TooManyAttempts,
 }
 
 impl Reason {
     /// Every reason, so a test can walk the whole set.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Network,
         Self::Server,
         Self::Protocol,
         Self::Challenge,
         Self::Crypto,
         Self::Configuration,
+        Self::NoQuorum,
         Self::TooManyAttempts,
     ];
 
@@ -58,6 +67,7 @@ impl Reason {
             Self::Challenge => "acme.challenge",
             Self::Crypto => "acme.crypto",
             Self::Configuration => "acme.configuration",
+            Self::NoQuorum => "acme.no_quorum",
             Self::TooManyAttempts => "acme.too_many_attempts",
         }
     }
@@ -70,7 +80,10 @@ impl Reason {
     /// (ADR-0026).
     #[must_use]
     pub const fn worth_retrying(self) -> bool {
-        matches!(self, Self::Network | Self::Server | Self::Protocol)
+        matches!(
+            self,
+            Self::Network | Self::Server | Self::Protocol | Self::NoQuorum
+        )
     }
 }
 

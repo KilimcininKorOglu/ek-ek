@@ -457,3 +457,166 @@ fn the_signing_request_is_handed_over_when_the_order_is_ready() {
     assert_eq!(url, FINALIZE_URL);
     assert_eq!(payload.as_deref(), Some(r#"{"csr":"Q1NSCg"}"#));
 }
+
+/// A flow that takes over an order the server already named.
+fn resumed() -> Flow {
+    Flow::resume(
+        DIRECTORY,
+        vec!["www.example.org".to_owned()],
+        THUMBPRINT,
+        "yonetici@example.org",
+        "Q1NSCg",
+        Challenge::Http01,
+        PLACED_URL,
+    )
+}
+
+/// Walks a resuming flow up to the point where it reads the order.
+fn up_to_the_carried_order(flow: &mut Flow) {
+    moved(flow, &Answer::new(200, directory_body(), None));
+    moved(flow, &Answer::new(204, String::new(), None));
+    moved(flow, &Answer::new(201, "{}", Some(ACCOUNT.to_owned())));
+}
+
+#[test]
+fn the_order_the_server_named_is_there_before_anything_is_published() {
+    let mut flow = flow();
+    assert_eq!(
+        flow.order_url(),
+        None,
+        "an order nothing was placed for named one"
+    );
+
+    moved(&mut flow, &Answer::new(200, directory_body(), None));
+    moved(&mut flow, &Answer::new(204, String::new(), None));
+    moved(&mut flow, &Answer::new(201, "{}", Some(ACCOUNT.to_owned())));
+    moved(
+        &mut flow,
+        &Answer::new(201, order_body("pending"), Some(PLACED_URL.to_owned())),
+    );
+
+    // The order is named and nothing has been published yet. That order is
+    // what lets a caller write the URL down before the step that can lose it
+    // (ADR-0086).
+    assert_eq!(flow.order_url(), Some(PLACED_URL));
+    assert!(
+        flow.published().is_empty(),
+        "the challenge answer was there before the order was even read"
+    );
+}
+
+#[test]
+fn a_taken_over_order_is_read_rather_than_placed_again() {
+    let mut flow = resumed();
+    assert_eq!(
+        flow.order_url(),
+        Some(PLACED_URL),
+        "a flow taking an order over did not carry the order it takes over"
+    );
+    up_to_the_carried_order(&mut flow);
+
+    let Some(Ask::Send {
+        url,
+        payload,
+        identify,
+    }) = flow.next()
+    else {
+        panic!("the carried order is read with a signed request");
+    };
+    assert_eq!(
+        url, PLACED_URL,
+        "the flow placed a second order instead of reading the one it was given, \
+         which would spend the server's allowance twice for one certificate"
+    );
+    assert_eq!(
+        payload, None,
+        "reading an order is a POST-as-GET; a body would create something"
+    );
+    assert_eq!(identify, Identify::Account);
+}
+
+#[test]
+fn an_order_taken_over_while_it_still_needs_an_answer_publishes_again() {
+    let mut flow = resumed();
+    up_to_the_carried_order(&mut flow);
+    moved(&mut flow, &Answer::new(200, order_body("pending"), None));
+    moved(&mut flow, &Answer::new(200, authorization_body(), None));
+
+    assert_eq!(
+        flow.published().entries.keys().collect::<Vec<&String>>(),
+        vec![TOKEN],
+        "the node that took the order over left the challenge path closed, \
+         so the server would check a path nothing answers"
+    );
+    let Some(Ask::Send { url, .. }) = flow.next() else {
+        panic!("the server is told the challenge is ready");
+    };
+    assert_eq!(url, CHALLENGE_URL);
+}
+
+#[test]
+fn an_order_taken_over_after_it_was_finalised_collects_the_certificate() {
+    let mut flow = resumed();
+    up_to_the_carried_order(&mut flow);
+    moved(
+        &mut flow,
+        &Answer::new(
+            200,
+            format!(
+                r#"{{"status":"valid","authorizations":["{AUTHZ_URL}"],"finalize":"{FINALIZE_URL}","certificate":"{CERTIFICATE_URL}"}}"#
+            ),
+            None,
+        ),
+    );
+
+    // Straight to the certificate. Walking the authorizations again would ask
+    // the server about work it has already finished, and finalising again
+    // would be refused.
+    let Some(Ask::Send { url, .. }) = flow.next() else {
+        panic!("the certificate is collected with a signed request");
+    };
+    assert_eq!(
+        url, CERTIFICATE_URL,
+        "an order that was already finalised was taken over as if it were new"
+    );
+    assert!(
+        flow.published().is_empty(),
+        "an order the server has already decided on left a challenge path open"
+    );
+}
+
+#[test]
+fn an_order_taken_over_that_is_ready_is_finalised_and_not_restarted() {
+    let mut flow = resumed();
+    up_to_the_carried_order(&mut flow);
+    moved(&mut flow, &Answer::new(200, order_body("ready"), None));
+
+    let Some(Ask::Send { url, payload, .. }) = flow.next() else {
+        panic!("the order is finalised with a signed request");
+    };
+    assert_eq!(url, FINALIZE_URL);
+    assert_eq!(
+        payload.as_deref(),
+        Some(r#"{"csr":"Q1NSCg"}"#),
+        "the signing request the taking over node holds is what finalises the order"
+    );
+}
+
+#[test]
+fn an_order_taken_over_after_it_failed_says_so_rather_than_waiting() {
+    let mut flow = resumed();
+    up_to_the_carried_order(&mut flow);
+
+    let failure = flow
+        .accept(&Answer::new(200, order_body("invalid"), None))
+        .expect_err("an order the server refused cannot be finished");
+    assert_eq!(
+        failure.reason(),
+        ek_ek_tls::Reason::Challenge,
+        "a refused order was reported as something worth another attempt"
+    );
+    assert!(
+        !failure.worth_retrying(),
+        "the same refused order would be read again for ever"
+    );
+}

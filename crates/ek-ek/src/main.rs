@@ -152,6 +152,15 @@ struct ClusterNodeArgs {
     /// Configuration file to watch and put through consensus when it changes
     #[arg(long)]
     apply: Option<String>,
+
+    /// File to write this node's share of the live ACME challenge answers to,
+    /// for the agent to deliver to the traffic path
+    #[arg(long)]
+    challenges: Option<String>,
+
+    /// Order certificates that are running out, while this node leads
+    #[arg(long)]
+    acme: bool,
 }
 
 #[derive(Args)]
@@ -359,6 +368,8 @@ fn main() -> ExitCode {
                 listen: &args.listen,
                 initialise: args.initialise.as_deref(),
                 apply: args.apply.as_deref(),
+                challenges: args.challenges.as_deref(),
+                acme: args.acme,
             });
         }
         Command::Cluster(ClusterCommand::Status(args)) => {

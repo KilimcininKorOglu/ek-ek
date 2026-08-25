@@ -49,9 +49,12 @@ pub mod order;
 pub mod record;
 pub mod renewal;
 
-pub use acme::{Obtained, POLL_INTERVAL, Reply, Transport, obtain, obtain_over, run};
+pub use acme::{
+    Obtained, POLL_INTERVAL, Plan, Reached, Reply, Transport, obtain, obtain_over, obtain_planned,
+    obtain_planned_over, run,
+};
 pub use attempt::{ATTEMPTS, FIRST_WAIT, wait_before, whole_run};
-pub use csr::{Request, request};
+pub use csr::{Request, generate, key_from_pem, key_to_pem, request, request_with};
 pub use dns::{CHALLENGE_LABEL, challenge_name};
 pub use error::{Failure, Reason};
 pub use inspect::{MOST_CERTIFICATES, Upload, inspect};
@@ -63,7 +66,10 @@ pub use metrics::{EXPIRY_METRIC, OBTAINED_METRIC, exposition};
 pub use order::{
     Answer, Ask, Challenge, Flow, MOST_NONCE_RETRIES, MOST_POLLS, Progress, Publication,
 };
-pub use record::{CHAIN_SUFFIX, KEY_SUFFIX, carry_obtained, chain_id, install, key_id, remove};
+pub use record::{
+    CHAIN_SUFFIX, KEY_SUFFIX, ORDER_KEY_SUFFIX, carry_obtained, chain_id, install, key_id,
+    order_key_id, remove,
+};
 pub use renewal::{
     ALARM_AFTER, Attempts, Because, Due, FIRST_BACKOFF, GROWING_WAITS, LONGEST_BACKOFF, RENEW_AT,
     backoff, due, remaining, renewable, why,

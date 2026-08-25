@@ -68,19 +68,65 @@ impl std::fmt::Debug for Request {
 /// Returns [`Reason::Configuration`] when no name was asked for, and
 /// [`Reason::Crypto`] when the request cannot be built or signed.
 pub fn request(names: &[String]) -> Result<Request, Failure> {
+    request_with(names, generate()?)
+}
+
+/// Generates one certificate key.
+///
+/// Separate from [`request`] because a replicated order stores the key before
+/// it places anything, so whichever node finishes the order holds the key the
+/// certificate is issued against (ADR-0086).
+///
+/// # Errors
+///
+/// Returns [`Reason::Crypto`] when the key cannot be generated.
+pub fn generate() -> Result<PKey<Private>, Failure> {
+    let group = EcGroup::from_curve_name(CURVE)
+        .map_err(|error| Failure::new(Reason::Crypto, format!("no P-256 group: {error}")))?;
+    let generated = EcKey::generate(&group)
+        .map_err(|error| Failure::new(Reason::Crypto, format!("no key: {error}")))?;
+    PKey::from_ec_key(generated)
+        .map_err(|error| Failure::new(Reason::Crypto, format!("the key does not wrap: {error}")))
+}
+
+/// Reads a stored certificate key back.
+///
+/// # Errors
+///
+/// Returns [`Reason::Crypto`] when the key does not open.
+pub fn key_from_pem(pem: &[u8]) -> Result<PKey<Private>, Failure> {
+    // No passphrase rather than a prompt: this runs with no terminal, and the
+    // default callback would wait forever on a question nobody sees.
+    PKey::private_key_from_pem_callback(pem, |_| Ok(0)).map_err(|error| {
+        Failure::new(
+            Reason::Crypto,
+            format!("the stored certificate key does not open: {error}"),
+        )
+    })
+}
+
+/// Writes a certificate key out for the store to seal.
+///
+/// # Errors
+///
+/// Returns [`Reason::Crypto`] when the key cannot be written.
+pub fn key_to_pem(key: &PKey<Private>) -> Result<Vec<u8>, Failure> {
+    key.private_key_to_pem_pkcs8()
+        .map_err(|error| Failure::new(Reason::Crypto, format!("the key does not write: {error}")))
+}
+
+/// Builds a signing request against a key the caller already holds.
+///
+/// # Errors
+///
+/// The same as [`request`].
+pub fn request_with(names: &[String], key: PKey<Private>) -> Result<Request, Failure> {
     let first = names.first().ok_or_else(|| {
         Failure::new(
             Reason::Configuration,
             "a certificate covering no name was asked for".to_owned(),
         )
     })?;
-
-    let group = EcGroup::from_curve_name(CURVE)
-        .map_err(|error| Failure::new(Reason::Crypto, format!("no P-256 group: {error}")))?;
-    let generated = EcKey::generate(&group)
-        .map_err(|error| Failure::new(Reason::Crypto, format!("no key: {error}")))?;
-    let key = PKey::from_ec_key(generated)
-        .map_err(|error| Failure::new(Reason::Crypto, format!("the key does not wrap: {error}")))?;
 
     let mut subject = X509Name::builder()
         .map_err(|error| Failure::new(Reason::Crypto, format!("no name builder: {error}")))?;

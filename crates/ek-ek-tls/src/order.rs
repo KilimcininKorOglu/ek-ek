@@ -182,6 +182,13 @@ enum Stage {
     Account,
     /// Place the order.
     Order,
+    /// Read an order somebody else placed, instead of placing one.
+    ///
+    /// The stage a node takes over at. The order document carries everything
+    /// [`Stage::Order`] would have learned from placing it: where to finalise,
+    /// which authorizations are outstanding, and how far the server has got
+    /// (ADR-0086).
+    Resume,
     /// Read the next authorization to learn its challenge.
     Authorization,
     /// Tell the server the challenge is ready to be checked.
@@ -224,6 +231,7 @@ pub struct Flow {
     published: Publication,
     chain: Option<String>,
     polls: u32,
+    resuming: bool,
 }
 
 impl Flow {
@@ -259,7 +267,45 @@ impl Flow {
             published: Publication::default(),
             chain: None,
             polls: 0,
+            resuming: false,
         }
+    }
+
+    /// Takes over an order a certificate authority already named.
+    ///
+    /// The same as [`Self::new`], except that the order is read rather than
+    /// placed. `csr` has to be built against the key the order was started
+    /// with, because the certificate is issued against that key and a node
+    /// finalising with another one would download something it cannot serve
+    /// (ADR-0086).
+    ///
+    /// The directory, the nonce and the account are still fetched. All three
+    /// are idempotent, and the account is what every request after this is
+    /// signed as.
+    #[must_use]
+    pub fn resume(
+        directory_url: impl Into<String>,
+        names: Vec<String>,
+        thumbprint: impl Into<String>,
+        contact: impl Into<String>,
+        csr: impl Into<String>,
+        kind: Challenge,
+        order_url: impl Into<String>,
+    ) -> Self {
+        let mut flow = Self::new(directory_url, names, thumbprint, contact, csr, kind);
+        flow.order = Some(order_url.into());
+        flow.resuming = true;
+        flow
+    }
+
+    /// The URL the server named this order with, once it has.
+    ///
+    /// What a caller writes down so another node can take the order over. It
+    /// is there from the moment the order is placed, which is before the first
+    /// challenge answer has to be published.
+    #[must_use]
+    pub fn order_url(&self) -> Option<&str> {
+        self.order.as_deref()
     }
 
     /// What to send next, or `None` when the order is finished.
@@ -280,6 +326,14 @@ impl Flow {
             Stage::Order => Some(Ask::Send {
                 url: self.directory.new_order.clone(),
                 payload: Some(self.order_payload()),
+                identify: Identify::Account,
+            }),
+            // A read of the order that is already there. No payload, because
+            // this creates nothing: the order exists and the server answers
+            // with the same document placing it would have returned.
+            Stage::Resume => self.order.clone().map(|url| Ask::Send {
+                url,
+                payload: None,
                 identify: Identify::Account,
             }),
             Stage::Authorization => self.waiting.first().map(|url| Ask::Send {
@@ -380,6 +434,7 @@ impl Flow {
             }
             Stage::Account => self.read_account(answer),
             Stage::Order => self.read_order(answer),
+            Stage::Resume => self.read_resumed(answer),
             Stage::Authorization => self.read_authorization(answer),
             Stage::Accept => {
                 // The server now has the challenge to check. The next
@@ -465,8 +520,73 @@ impl Flow {
             Failure::new(Reason::Protocol, "the server named no account".to_owned())
         })?;
         self.account = Some(account);
-        self.stage = Stage::Order;
+        self.stage = if self.resuming {
+            Stage::Resume
+        } else {
+            Stage::Order
+        };
         Ok(Progress::Moved)
+    }
+
+    /// Reads an order this flow did not place.
+    ///
+    /// The order's own status decides where to go, rather than the list of
+    /// authorizations. An order the previous node already finalised is one
+    /// whose certificate is waiting to be collected, and walking its
+    /// authorizations again would ask the server about work it has finished.
+    fn read_resumed(&mut self, answer: &Answer) -> Result<Progress, Failure> {
+        let document = parse(&answer.body)?;
+        self.finalize = Some(text(&document, "finalize")?);
+        self.waiting = document
+            .get("authorizations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Failure::new(
+                    Reason::Protocol,
+                    "the order names no authorizations".to_owned(),
+                )
+            })?
+            .iter()
+            .filter_map(|url| url.as_str().map(str::to_owned))
+            .collect();
+
+        match document.get("status").and_then(Value::as_str) {
+            Some("valid") => {
+                self.certificate = Some(text(&document, "certificate")?);
+                self.stage = Stage::Download;
+                Ok(Progress::Moved)
+            }
+            Some("ready") => {
+                self.stage = Stage::Finalize;
+                Ok(Progress::Moved)
+            }
+            // Still waiting on a challenge, so the answers have to go back up.
+            // Reading the order again instead would wait for a check the
+            // server cannot make, because nothing is answering for it.
+            Some("pending") => {
+                self.stage = if self.waiting.is_empty() {
+                    Stage::Poll
+                } else {
+                    Stage::Authorization
+                };
+                Ok(Progress::Moved)
+            }
+            Some("processing") => {
+                self.stage = Stage::Poll;
+                Ok(Progress::Moved)
+            }
+            Some("invalid") => Err(Failure::new(
+                Reason::Challenge,
+                format!(
+                    "the order that was taken over had already failed for {}",
+                    self.names.join(", ")
+                ),
+            )),
+            other => Err(Failure::new(
+                Reason::Protocol,
+                format!("the order is in a state this client does not know: {other:?}"),
+            )),
+        }
     }
 
     fn read_order(&mut self, answer: &Answer) -> Result<Progress, Failure> {
@@ -666,6 +786,7 @@ const fn kind_of(stage: Stage) -> &'static str {
         Stage::Nonce => "collecting a nonce",
         Stage::Account => "creating the account",
         Stage::Order => "placing the order",
+        Stage::Resume => "taking over the order",
         Stage::Authorization => "reading an authorization",
         Stage::Accept => "handing over the challenge",
         Stage::Poll => "reading the order",

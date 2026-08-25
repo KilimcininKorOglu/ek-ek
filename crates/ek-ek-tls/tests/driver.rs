@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use ek_ek_config::AcmeSettings;
 use ek_ek_tls::{
-    ATTEMPTS, Challenge, FIRST_WAIT, Failure, Publication, Reason, Reply, Transport, obtain_over,
-    wait_before,
+    ATTEMPTS, Challenge, FIRST_WAIT, Failure, Publication, Reached, Reason, Reply, Transport,
+    obtain_over, wait_before,
 };
 
 const DIRECTORY: &str = "https://acme.example.org/dir";
@@ -175,6 +175,38 @@ fn issuing() -> Vec<Scripted> {
     ]
 }
 
+/// The same order, read rather than placed, with an answer already up.
+///
+/// The account is read first either way. After that the driver reads the order
+/// the previous node named instead of asking for a new one, so there is no
+/// `newOrder` reply in this script and the first read answers with the order
+/// itself.
+fn resuming() -> Vec<Scripted> {
+    vec![
+        ok(format!(
+            r#"{{"newNonce":"{NONCE_URL}","newAccount":"{ACCOUNT_URL}","newOrder":"{ORDER_URL}"}}"#
+        )),
+        Scripted {
+            status: 204,
+            body: String::new(),
+            location: None,
+        },
+        made("{}", "https://acme.example.org/account/7"),
+        ok(format!(
+            r#"{{"status":"pending","authorizations":["{AUTHZ_URL}"],"finalize":"{FINALIZE_URL}"}}"#
+        )),
+        ok(format!(
+            r#"{{"status":"pending","challenges":[{{"type":"http-01","url":"{CHALLENGE_URL}","token":"{TOKEN}"}}]}}"#
+        )),
+        ok("{}"),
+        ok(r#"{"status":"ready"}"#),
+        ok(format!(
+            r#"{{"status":"valid","certificate":"{CERTIFICATE_URL}"}}"#
+        )),
+        ok(CHAIN),
+    ]
+}
+
 /// What the publisher was told, in order.
 type Published = Vec<Publication>;
 
@@ -222,7 +254,24 @@ fn run_kind(mut transport: Fake, directory: &str, kind: Challenge) -> Run {
     let timeline = Arc::clone(&transport.timeline);
 
     let outcome = {
-        let mut publish = |challenges: &Publication| -> Result<(), Failure> {
+        let mut publish = |reached: &Reached| -> Result<(), Failure> {
+            let challenges = &reached.publication;
+            // Only a change to the path counts. The driver also reports the
+            // order URL the moment the server names it, and that record
+            // carries no publication: counting it as one would make an order
+            // that opened the path once look like one that opened it twice.
+            let mut held = published.lock().expect("nothing else holds it");
+            // An empty publication before anything went up is not the path
+            // closing either: nothing was open.
+            if held
+                .last()
+                .is_none_or(|last| last.entries == challenges.entries)
+                && (held.last().is_some() || challenges.is_empty())
+            {
+                return Ok(());
+            }
+            held.push(challenges.clone());
+            drop(held);
             timeline
                 .lock()
                 .expect("nothing else holds it")
@@ -231,10 +280,6 @@ fn run_kind(mut transport: Fake, directory: &str, kind: Challenge) -> Run {
                 } else {
                     PUBLISHED.to_owned()
                 });
-            published
-                .lock()
-                .expect("nothing else holds it")
-                .push(challenges.clone());
             Ok(())
         };
         let mut pause = |wait: Duration| {
@@ -510,7 +555,8 @@ fn a_server_that_rejects_every_nonce_stops_rather_than_looping() {
 fn a_publisher_that_cannot_open_the_path_stops_the_order() {
     let key = ek_ek_tls::account_key().expect("an account key");
     let mut transport = Fake::new(issuing());
-    let mut publish = |challenges: &Publication| -> Result<(), Failure> {
+    let mut publish = |reached: &Reached| -> Result<(), Failure> {
+        let challenges = &reached.publication;
         if challenges.is_empty() {
             Ok(())
         } else {
@@ -574,7 +620,7 @@ fn nothing_secret_reaches_a_log_or_an_error() {
     // A run that goes all the way through, so the records cover the working
     // path as well as the failing one.
     let mut transport = Fake::new(issuing());
-    let mut publish = |_: &Publication| Ok(());
+    let mut publish = |_: &Reached| Ok(());
     let mut pause = |_: Duration| {};
     let good = obtain_over(
         &settings(DIRECTORY),
@@ -635,7 +681,8 @@ fn a_publication_that_failed_halfway_is_still_taken_away() {
         // A publisher that put the answer somewhere and then failed on the
         // step after, which is what a record written to a zone that has not
         // caught up looks like.
-        let mut publish = |challenges: &Publication| -> Result<(), Failure> {
+        let mut publish = |reached: &Reached| -> Result<(), Failure> {
+            let challenges = &reached.publication;
             seen.lock()
                 .expect("nothing else holds it")
                 .push(challenges.clone());
@@ -665,5 +712,129 @@ fn a_publication_that_failed_halfway_is_still_taken_away() {
     assert!(
         seen.iter().any(|publication| publication.is_empty()),
         "the publisher was never told to take away what it had already put in place: {seen:?}"
+    );
+}
+
+#[test]
+fn a_taken_over_order_never_reports_an_empty_answer_before_it_publishes_again() {
+    // The answer of the node that stopped is already in the state and already
+    // being served. If the driver starts from nothing, its first record says
+    // "no answer", the state is emptied, and every node stops answering until
+    // the same value is put back. The certificate authority checking in that
+    // window gets a 404 and refuses the challenge (ADR-0086).
+    let key = ek_ek_tls::account_key().expect("an account key");
+    let seen: Mutex<Vec<Reached>> = Mutex::new(Vec::new());
+    let mut transport = Fake::new(resuming());
+
+    let outcome = {
+        let mut record = |reached: &Reached| -> Result<(), Failure> {
+            seen.lock()
+                .expect("nothing else holds it")
+                .push(reached.clone());
+            Ok(())
+        };
+        let mut pause = |_: Duration| {};
+        ek_ek_tls::obtain_planned_over(
+            &settings(DIRECTORY),
+            &key,
+            &["www.example.org".to_owned()],
+            Challenge::Http01,
+            ek_ek_tls::Plan {
+                key: None,
+                resume: Some(PLACED_URL),
+            },
+            &mut transport,
+            &mut record,
+            &mut pause,
+        )
+    };
+    assert!(outcome.is_ok(), "the taken over order completes");
+
+    let seen = seen.into_inner().expect("nothing else holds it");
+    let first_answer = seen
+        .iter()
+        .position(|reached| !reached.publication.is_empty())
+        .expect("the driver never published a challenge answer");
+    // Nothing at all before the answer. Every record replaces what the state
+    // holds, and a record carrying no answer empties it whichever kind it
+    // names. A fresh order records the URL first and that is right, because
+    // there is nothing to empty; a taken over order has both already in the
+    // state, so the first record it may make is the one carrying the answer.
+    assert_eq!(
+        first_answer, 0,
+        "the driver recorded {} thing(s) with no answer before it published \
+         one, and each of them empties the answer the stopped node left in \
+         place while the certificate authority may be reading it: {seen:?}",
+        first_answer
+    );
+
+    // The order it was told to take over is the one it worked on. A driver
+    // that placed a fresh order would report a different URL, and the record
+    // the previous node left would name an order nobody finishes.
+    assert_eq!(
+        seen[0].order_url.as_deref(),
+        Some(PLACED_URL),
+        "the first thing recorded is not the order that was taken over"
+    );
+}
+
+#[test]
+fn the_order_url_is_recorded_before_the_challenge_answer_is_published() {
+    let key = ek_ek_tls::account_key().expect("an account key");
+    let seen: Mutex<Vec<Reached>> = Mutex::new(Vec::new());
+    let mut transport = Fake::new(issuing());
+
+    let outcome = {
+        let mut record = |reached: &Reached| -> Result<(), Failure> {
+            seen.lock()
+                .expect("nothing else holds it")
+                .push(reached.clone());
+            Ok(())
+        };
+        let mut pause = |_: Duration| {};
+        obtain_over(
+            &settings(DIRECTORY),
+            &key,
+            &["www.example.org".to_owned()],
+            Challenge::Http01,
+            &mut transport,
+            &mut record,
+            &mut pause,
+        )
+    };
+    assert!(outcome.is_ok(), "the order completes");
+
+    let seen = seen.into_inner().expect("nothing else holds it");
+    let first_url = seen
+        .iter()
+        .position(|reached| reached.order_url.is_some())
+        .expect("the driver never reported the order the server named");
+    let first_answer = seen
+        .iter()
+        .position(|reached| !reached.publication.is_empty())
+        .expect("the driver never published a challenge answer");
+
+    assert!(
+        first_url < first_answer,
+        "the challenge answer was recorded before the order it belongs to, \
+         so a node that stopped in between would leave an answer for an order \
+         nobody can find: {seen:?}"
+    );
+    assert_eq!(
+        seen[first_url].order_url.as_deref(),
+        Some(PLACED_URL),
+        "the URL recorded is not the one the server named"
+    );
+    assert!(
+        seen[first_url].publication.is_empty(),
+        "the order URL and the answer were recorded together, \
+         so nothing measures which of the two lands first"
+    );
+    // And the order stays named to the end, so the record a caller keeps while
+    // the order runs never loses the one thing another node needs.
+    assert_eq!(
+        seen.last().and_then(|reached| reached.order_url.as_deref()),
+        Some(PLACED_URL),
+        "the driver dropped the order URL while closing the challenge path"
     );
 }

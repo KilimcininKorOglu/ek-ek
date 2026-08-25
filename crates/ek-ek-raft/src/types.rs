@@ -13,10 +13,10 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use ek_ek_config::{Config, NodeId, SecretId};
+use ek_ek_config::{CertificateId, Config, NodeId, SecretId};
 use ek_ek_store::{
-    AuditRecord, Change, ClusterIdentity, FullState, JoinRecord, Secret, Snapshot, StoredVersion,
-    TokenId, VersionId,
+    AuditRecord, Change, ClusterIdentity, FullState, JoinRecord, OrderChallenge, OrderRecord,
+    Secret, Snapshot, StoredVersion, TokenId, VersionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -153,6 +153,99 @@ pub struct WireSnapshot {
     /// Nodes this cluster has removed, by name.
     #[serde(default)]
     pub removed: Vec<String>,
+    /// Certificate orders this cluster is running, by the certificate.
+    #[serde(default)]
+    pub orders: BTreeMap<String, WireOrder>,
+}
+
+/// Which challenge an order answers, as it travels.
+///
+/// An enum rather than a string, so a record naming a challenge this build
+/// does not know is refused where it arrives instead of being guessed at. A
+/// guess would publish the answer somewhere the certificate authority never
+/// looks, and the only sign of it would be a name the server refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireChallenge {
+    /// Answered at a path on port 80.
+    #[serde(rename = "http-01")]
+    Http01,
+    /// Answered by a TXT record.
+    #[serde(rename = "dns-01")]
+    Dns01,
+}
+
+impl From<OrderChallenge> for WireChallenge {
+    fn from(challenge: OrderChallenge) -> Self {
+        match challenge {
+            OrderChallenge::Http01 => Self::Http01,
+            OrderChallenge::Dns01 => Self::Dns01,
+        }
+    }
+}
+
+impl From<WireChallenge> for OrderChallenge {
+    fn from(challenge: WireChallenge) -> Self {
+        match challenge {
+            WireChallenge::Http01 => Self::Http01,
+            WireChallenge::Dns01 => Self::Dns01,
+        }
+    }
+}
+
+/// One running certificate order, as it travels.
+///
+/// The signing key is not here. It is a secret like any other, so it travels
+/// in [`WireSnapshot::secrets`] under the identity this record names, and it
+/// reaches the disk sealed with the receiving node's own master key
+/// (ADR-0018, ADR-0086).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireOrder {
+    /// The names the order covers.
+    pub names: Vec<String>,
+    /// Which challenge it answers.
+    pub challenge: WireChallenge,
+    /// The URL the certificate authority named the order with.
+    pub order_url: Option<String>,
+    /// The identity the signing key is stored under.
+    pub key: String,
+    /// What every node has to answer while the server checks.
+    pub answers: BTreeMap<String, String>,
+    /// Which node wrote this record last, when one is running in a cluster.
+    pub driven_by: Option<String>,
+    /// When the order started, as a Unix timestamp in seconds.
+    pub started_at_unix: i64,
+}
+
+impl From<&OrderRecord> for WireOrder {
+    fn from(record: &OrderRecord) -> Self {
+        Self {
+            names: record.names.clone(),
+            challenge: record.challenge.into(),
+            order_url: record.order_url.clone(),
+            key: record.key.as_str().to_owned(),
+            answers: record.answers.clone(),
+            driven_by: record
+                .driven_by
+                .as_ref()
+                .map(|node| node.as_str().to_owned()),
+            started_at_unix: record.started_at_unix,
+        }
+    }
+}
+
+impl From<&WireOrder> for OrderRecord {
+    fn from(record: &WireOrder) -> Self {
+        Self {
+            names: record.names.clone(),
+            challenge: record.challenge.into(),
+            order_url: record.order_url.clone(),
+            key: SecretId::new(&record.key),
+            answers: record.answers.clone(),
+            driven_by: record.driven_by.as_ref().map(NodeId::new),
+            started_at_unix: record.started_at_unix,
+        }
+    }
 }
 
 /// One join token, as it travels.
@@ -208,6 +301,11 @@ impl From<&Snapshot> for WireSnapshot {
                 .iter()
                 .map(|node| node.as_str().to_owned())
                 .collect(),
+            orders: state
+                .orders
+                .iter()
+                .map(|(id, record)| (id.as_str().to_owned(), WireOrder::from(record)))
+                .collect(),
         }
     }
 }
@@ -239,6 +337,11 @@ impl From<&WireSnapshot> for Snapshot {
                 })
                 .collect(),
             removed: state.removed.iter().map(NodeId::new).collect(),
+            orders: state
+                .orders
+                .iter()
+                .map(|(id, record)| (CertificateId::new(id), OrderRecord::from(record)))
+                .collect(),
         }
     }
 }

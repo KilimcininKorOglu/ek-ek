@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ek_ek_config::{Config, NodeId, SchemaVersion, SecretId};
+use ek_ek_config::{CertificateId, Config, NodeId, SchemaVersion, SecretId};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::cluster::ClusterIdentity;
@@ -23,6 +23,7 @@ use crate::journal::{AuditRecord, FullState, Journal, Record, StoredVersion};
 use crate::master_key::{MASTER_KEY_FILE, MasterKey};
 use crate::membership::{JoinRecord, Removed, TokenId};
 use crate::migration::{MIGRATIONS, Migration, migrate_document, target_version};
+use crate::order::{OrderChallenge, OrderRecord, Orders};
 use crate::secret::Secret;
 use crate::store::{Snapshot, Store};
 use crate::version::{
@@ -381,6 +382,7 @@ impl Store for SqliteStore {
             cluster: authority_pem.map(ClusterIdentity::new),
             joins: read_joins(&connection)?,
             removed: read_removed(&connection)?,
+            orders: read_orders(&connection)?,
         }))
     }
 
@@ -500,6 +502,7 @@ impl SqliteStore {
         // believes it withdrew (ADR-0084).
         write_joins(&transaction, snapshot)?;
         write_removed(&transaction, snapshot)?;
+        write_orders(&transaction, snapshot)?;
 
         let version = append_version(&transaction, &document, snapshot, change, restored, now)?;
         prune(&transaction, change, now)?;
@@ -644,17 +647,19 @@ impl History for SqliteStore {
         let mut config = restored;
         config.certificates = current.config.certificates.clone();
 
-        // The join tokens and the removed nodes are carried forward for the
-        // same reason the authority is: none of them is in the config document
-        // at all. A rollback that resurrected a used token or readmitted a
-        // removed node would undo a security decision by restoring a
-        // configuration (ADR-0084).
+        // The join tokens, the removed nodes and the running orders are
+        // carried forward for the same reason the authority is: none of them
+        // is in the config document at all. A rollback that resurrected a used
+        // token, readmitted a removed node or restarted an order that finished
+        // days ago would undo a decision by restoring a configuration
+        // (ADR-0084, ADR-0086).
         let snapshot = Snapshot {
             config,
             secrets: current.secrets,
             cluster: current.cluster,
             joins: current.joins,
             removed: current.removed,
+            orders: current.orders,
         };
         self.write_version(
             &snapshot,
@@ -944,6 +949,118 @@ fn write_joins(transaction: &Transaction<'_>, snapshot: &Snapshot) -> Result<()>
     Ok(())
 }
 
+/// Reads the orders the cluster is running.
+///
+/// The names and the answers are two columns of JSON rather than two tables.
+/// They are only ever read and written whole with the record they belong to,
+/// and a table nothing joins against buys nothing.
+fn read_orders(connection: &Connection) -> Result<Orders> {
+    let mut statement = connection
+        .prepare(
+            "SELECT certificate, names, challenge, order_url, key_id, answers, driven_by, started_at \
+             FROM acme_order ORDER BY certificate",
+        )
+        .map_err(storage("the running orders could not be prepared"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })
+        .map_err(storage("the running orders could not be read"))?;
+
+    let mut held = Orders::new();
+    for row in rows {
+        let (certificate, names, challenge, order_url, key_id, answers, driven_by, started_at) =
+            row.map_err(storage("a running order could not be read"))?;
+
+        // A challenge nothing recognises is a failure rather than a default.
+        // Guessing here would drive an order the wrong way and publish the
+        // answer somewhere the certificate authority never looks.
+        let challenge = OrderChallenge::from_key(&challenge).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Serialisation,
+                format!("{certificate} names a challenge this build does not know: {challenge}"),
+            )
+        })?;
+        let names: Vec<String> = serde_json::from_str(&names).map_err(|error| {
+            Error::new(
+                ErrorKind::Serialisation,
+                format!("the names of {certificate} could not be read: {error}"),
+            )
+        })?;
+        let answers: BTreeMap<String, String> =
+            serde_json::from_str(&answers).map_err(|error| {
+                Error::new(
+                    ErrorKind::Serialisation,
+                    format!("the challenge answers of {certificate} could not be read: {error}"),
+                )
+            })?;
+
+        held.insert(
+            CertificateId::new(certificate),
+            OrderRecord {
+                names,
+                challenge,
+                order_url,
+                key: SecretId::new(key_id),
+                answers,
+                driven_by: driven_by.map(NodeId::new),
+                started_at_unix: started_at,
+            },
+        );
+    }
+    Ok(held)
+}
+
+/// Replaces the running orders with the ones the state carries.
+fn write_orders(transaction: &Transaction<'_>, snapshot: &Snapshot) -> Result<()> {
+    transaction
+        .execute("DELETE FROM acme_order", [])
+        .map_err(storage("the previous running orders could not be replaced"))?;
+
+    for (id, record) in &snapshot.orders {
+        let names = serde_json::to_string(&record.names).map_err(|error| {
+            Error::new(
+                ErrorKind::Serialisation,
+                format!("the names of an order could not be written out: {error}"),
+            )
+        })?;
+        let answers = serde_json::to_string(&record.answers).map_err(|error| {
+            Error::new(
+                ErrorKind::Serialisation,
+                format!("the challenge answers could not be written out: {error}"),
+            )
+        })?;
+        transaction
+            .execute(
+                "INSERT INTO acme_order \
+                 (certificate, names, challenge, order_url, key_id, answers, driven_by, started_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    id.as_str(),
+                    names,
+                    record.challenge.key(),
+                    record.order_url,
+                    record.key.as_str(),
+                    answers,
+                    record.driven_by.as_ref().map(NodeId::as_str),
+                    record.started_at_unix
+                ],
+            )
+            .map_err(storage("a running order could not be written"))?;
+    }
+    Ok(())
+}
+
 /// Replaces the removed nodes with the ones the state carries.
 fn write_removed(transaction: &Transaction<'_>, snapshot: &Snapshot) -> Result<()> {
     transaction
@@ -1099,6 +1216,7 @@ impl SqliteStore {
             "DELETE FROM cluster_identity",
             "DELETE FROM join_token",
             "DELETE FROM removed_node",
+            "DELETE FROM acme_order",
         ] {
             transaction
                 .execute(statement, [])
@@ -1124,11 +1242,14 @@ impl SqliteStore {
                     .map_err(storage("the cluster identity could not be written"))?;
             }
 
-            // The tokens and the removed nodes travel with everything else. A
-            // node that caught up without them would readmit a caller its
-            // peers refuse and honour a token they consider spent (ADR-0084).
+            // The tokens, the removed nodes and the running orders travel with
+            // everything else. A node that caught up without them would
+            // readmit a caller its peers refuse, honour a token they consider
+            // spent, and answer no challenge for an order in flight
+            // (ADR-0084, ADR-0086).
             write_joins(&transaction, held)?;
             write_removed(&transaction, held)?;
+            write_orders(&transaction, held)?;
 
             let document = serde_json::to_string(&held.config).map_err(|error| {
                 Error::new(
@@ -1393,6 +1514,17 @@ CREATE TABLE IF NOT EXISTS join_token (
 
 CREATE TABLE IF NOT EXISTS removed_node (
     node TEXT PRIMARY KEY
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS acme_order (
+    certificate TEXT    PRIMARY KEY,
+    names       TEXT    NOT NULL,
+    challenge   TEXT    NOT NULL,
+    order_url   TEXT,
+    key_id      TEXT    NOT NULL,
+    answers     TEXT    NOT NULL,
+    driven_by   TEXT,
+    started_at  INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS cluster_identity (
