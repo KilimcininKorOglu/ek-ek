@@ -85,7 +85,11 @@ struct Routed {
     pool: String,
     member: String,
     address: SocketAddr,
-    connect_timeout: Duration,
+    /// How long to wait for the backend to accept, when there is a limit.
+    ///
+    /// Zero in a configuration means no limit, the same as it does for a
+    /// request (ADR-0058), so it arrives here as nothing to wait against.
+    connect_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     /// Which PROXY header, if any, this backend is told the client with.
     proxy_protocol: ProxyProtocol,
@@ -165,7 +169,7 @@ impl StreamProxy {
             pool: name.to_owned(),
             member: member.id.as_str().to_owned(),
             address: SocketAddr::new(member.address, member.port),
-            connect_timeout: Duration::from_secs(u64::from(frontend.connect_timeout_seconds)),
+            connect_timeout: frontend.connect_limit(),
             // Zero means no limit (ADR-0060).
             idle_timeout: match frontend.idle_timeout_seconds {
                 0 => None,
@@ -449,8 +453,11 @@ impl ServerApp for StreamProxy {
             return None;
         };
 
-        let backend =
-            tokio::time::timeout(routed.connect_timeout, TcpStream::connect(routed.address)).await;
+        let connecting = TcpStream::connect(routed.address);
+        let backend = match routed.connect_timeout {
+            Some(limit) => tokio::time::timeout(limit, connecting).await,
+            None => Ok(connecting.await),
+        };
         let Ok(Ok(mut backend)) = backend else {
             // Unreachable member. The client connection is closed without
             // anything having been forwarded, so nothing is half-sent.

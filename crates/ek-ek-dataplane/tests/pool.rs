@@ -19,6 +19,7 @@ use ek_ek_config::{
     MemberId,
 };
 use ek_ek_dataplane::pool::{Gates, reuse_group, slot};
+use ek_ek_dataplane::upstream;
 
 /// A pool with the settings a measurement names.
 fn pool(pooling: ConnectionPooling, size: u32, lifetime_seconds: u32) -> Backend {
@@ -202,4 +203,75 @@ fn the_defaults_are_the_ones_the_decision_names() {
     );
     assert!(web.limits_requests_in_flight());
     assert!(!pool(ConnectionPooling::Enabled, 0, 300).limits_requests_in_flight());
+}
+
+#[test]
+fn a_pool_that_does_not_reuse_gets_a_timer_pingora_can_hold() {
+    // A zero duration is not one pingora's timer can hold: it rounds a
+    // duration up to a ten millisecond boundary and subtracts one on the way,
+    // so zero underflows. Measured in this repository: the thread the request
+    // was on died, the process went on answering the agent, and that port
+    // served nothing (ADR-0087).
+    let peer = upstream(
+        std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+        Some(Duration::from_secs(2)),
+        5,
+        ConnectionPooling::Disabled,
+        7,
+    )
+    .expect("a peer has options");
+
+    let idle = peer
+        .options
+        .idle_timeout
+        .expect("a pool that does not reuse sets an idle timeout");
+    assert!(
+        !idle.is_zero(),
+        "the idle timeout is zero, which panics the thread the request is on"
+    );
+    assert!(
+        idle <= Duration::from_millis(10),
+        "the connection is kept idle for {idle:?}, long enough to be worth \
+         reusing, and this pool must not reuse one"
+    );
+}
+
+#[test]
+fn a_frontend_with_no_connect_limit_hands_pingora_no_timer() {
+    // What `Frontend::connect_limit` returns for a frontend that asked for no
+    // limit. Handing pingora a duration of zero instead would panic the
+    // thread the request is on; handing it the shortest timer it can hold
+    // would fail every connection.
+    let peer = upstream(
+        std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+        None,
+        5,
+        ConnectionPooling::Enabled,
+        7,
+    )
+    .expect("a peer has options");
+
+    assert!(
+        peer.options.connection_timeout.is_none(),
+        "a frontend that asks for no connect limit got one of {:?}",
+        peer.options.connection_timeout
+    );
+}
+
+#[test]
+fn a_frontend_with_a_connect_limit_hands_pingora_that_limit() {
+    let peer = upstream(
+        std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+        Some(Duration::from_secs(3)),
+        5,
+        ConnectionPooling::Enabled,
+        7,
+    )
+    .expect("a peer has options");
+
+    assert_eq!(
+        peer.options.connection_timeout,
+        Some(Duration::from_secs(3)),
+        "the limit the frontend asked for is not the one pingora got"
+    );
 }

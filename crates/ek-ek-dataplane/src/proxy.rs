@@ -163,6 +163,12 @@ impl Proxy {
     }
 }
 
+/// The shortest duration pingora's timer can hold.
+///
+/// Its resolution is ten milliseconds and it rounds up, so anything under
+/// that becomes ten. Zero it cannot hold at all.
+const SHORTEST_TIMER: Duration = Duration::from_millis(1);
+
 /// Builds the upstream peer a request is sent to.
 ///
 /// Written out here rather than inline so the numbers a configuration names
@@ -174,7 +180,7 @@ impl Proxy {
 #[must_use]
 pub fn upstream(
     address: SocketAddr,
-    connect_timeout_seconds: u32,
+    connect_limit: Option<Duration>,
     request_timeout_seconds: u32,
     pooling: ConnectionPooling,
     reuse_group: u64,
@@ -189,7 +195,11 @@ pub fn upstream(
     peer.group_key = reuse_group;
     let options = peer.get_mut_peer_options()?;
 
-    options.connection_timeout = Some(Duration::from_secs(u64::from(connect_timeout_seconds)));
+    // Nothing when the frontend asked for no limit. Setting a duration of
+    // zero would panic the thread the request is on, and setting the shortest
+    // one pingora can hold would fail every connection instead
+    // (`Frontend::connect_limit`).
+    options.connection_timeout = connect_limit;
     // Zero means no limit, which is what an ActiveSync or IMAP IDLE request
     // needs (ADR-0058). The value comes from the rule that took the request,
     // falling back to the frontend's own (ADR-0071).
@@ -199,7 +209,18 @@ pub fn upstream(
     if pooling == ConnectionPooling::Disabled {
         // NTLM binds authentication to the connection, so reuse would hand
         // one client's authenticated connection to another (ADR-0045).
-        options.idle_timeout = Some(Duration::ZERO);
+        //
+        // The shortest timer pingora can take rather than zero. Its timer
+        // rounds a duration up to a ten millisecond boundary and subtracts
+        // one from the value on the way, so zero underflows and panics the
+        // thread the request is on. Measured: a frontend thread died that
+        // way and the process went on answering the agent while that port
+        // served nothing, which is the fault ADR-0087 exists to catch.
+        //
+        // Nothing is reused through the window this leaves. A pool that does
+        // not reuse gets a group of its own for every request, so pingora
+        // never finds a connection to share (`crate::pool::reuse_group`).
+        options.idle_timeout = Some(SHORTEST_TIMER);
     }
 
     Some(peer)
@@ -486,7 +507,7 @@ impl ProxyHttp for Proxy {
         let address = SocketAddr::new(member.address, member.port);
         let peer = upstream(
             address,
-            frontend.connect_timeout_seconds,
+            frontend.connect_limit(),
             request_limit,
             pool.connection_pooling,
             crate::pool::reuse_group(pool),

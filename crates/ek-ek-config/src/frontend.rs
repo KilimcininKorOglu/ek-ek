@@ -14,6 +14,8 @@
 //! a mistake produces an error naming the field rather than a silently
 //! dropped setting.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::id::{BackendId, CertificateId, FrontendId, VipId};
@@ -105,6 +107,24 @@ pub struct Frontend {
     /// a syslog service see very different numbers of clients.
     #[serde(default)]
     pub udp_session_limit: u32,
+}
+
+impl Frontend {
+    /// How long to wait for a backend to accept, when there is a limit.
+    ///
+    /// Zero means no limit, the same as it does for a request (ADR-0058).
+    /// The rule lives here rather than at each reader, because both the HTTP
+    /// path and the raw path read this one field and a reader that took zero
+    /// at face value would break in its own way: one hands the value to a
+    /// timer that cannot hold zero, the other times every connection out
+    /// before it is made.
+    #[must_use]
+    pub const fn connect_limit(&self) -> Option<Duration> {
+        match self.connect_timeout_seconds {
+            0 => None,
+            seconds => Some(Duration::from_secs(seconds as u64)),
+        }
+    }
 }
 
 /// Transport layer a frontend listens with.

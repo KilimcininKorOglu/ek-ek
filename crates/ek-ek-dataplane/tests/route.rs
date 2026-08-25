@@ -468,7 +468,7 @@ fn a_timeout_of_an_hour_reaches_the_upstream_it_governs() {
 
     let peer = upstream(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        2,
+        Some(Duration::from_secs(2)),
         decided.expect("a pool was chosen"),
         ConnectionPooling::Enabled,
         0,
@@ -488,7 +488,7 @@ fn a_timeout_of_zero_leaves_the_upstream_with_no_limit_at_all() {
     // request out immediately instead of never (ADR-0058).
     let peer = upstream(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-        2,
+        Some(Duration::from_secs(2)),
         0,
         ConnectionPooling::Enabled,
         0,

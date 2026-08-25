@@ -278,3 +278,31 @@ fn the_connection_settings_survive_a_serialisation_round_trip() {
         "a lifetime of zero retires nothing"
     );
 }
+
+#[test]
+fn a_connect_limit_of_zero_is_no_limit_at_all() {
+    // Zero means no limit, as it does for a request (ADR-0058). Two readers
+    // take this field and each one breaks its own way on a literal zero: the
+    // HTTP path hands it to a timer that cannot hold zero and panics the
+    // thread the request is on, and the raw path times every connection out
+    // before it is made. The rule lives on the field so both read it once.
+    let mut frontend = sample()
+        .frontends
+        .first()
+        .expect("the sample has a frontend")
+        .clone();
+
+    frontend.connect_timeout_seconds = 0;
+    assert_eq!(
+        frontend.connect_limit(),
+        None,
+        "a frontend that asked for no connect limit was given one"
+    );
+
+    frontend.connect_timeout_seconds = 7;
+    assert_eq!(
+        frontend.connect_limit(),
+        Some(std::time::Duration::from_secs(7)),
+        "the limit the frontend asked for is not the one a reader gets"
+    );
+}

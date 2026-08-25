@@ -456,3 +456,30 @@ async fn a_thousand_connections_are_all_served() {
     );
     assert_eq!(echo.accepted(), 1000, "the backend saw a different count");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_raw_frontend_with_no_connect_limit_still_serves() {
+    // Zero means no limit, as it does for a request (ADR-0058). A raw
+    // frontend that read it as a limit of zero would time every connection
+    // out before it was made and serve nothing at all, while the process went
+    // on calling itself healthy.
+    let backend = RawMember::start("one", RawBehaviour::Echo).await;
+    let port = free_port();
+    let document = Document::new(port, vec![backend.entry(1, "enabled")])
+        .raw()
+        .connect_timeout(0);
+    let running = Running::start(&document).await;
+
+    let mut stream = connect(running.port).await;
+    stream
+        .write_all(b"hello")
+        .await
+        .expect("the client can write");
+
+    let mut buffer = [0_u8; 5];
+    tokio::time::timeout(PATIENCE, stream.read_exact(&mut buffer))
+        .await
+        .expect("a frontend with no connect limit must still reach its backend")
+        .expect("the backend answers");
+    assert_eq!(&buffer, b"hello");
+}
