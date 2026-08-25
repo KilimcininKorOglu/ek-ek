@@ -337,11 +337,14 @@ pub struct Fleet {
     pub nodes: Vec<Node>,
     /// The settings every node runs.
     pub settings: openraft::Config,
+    /// This cluster's place among the ones running at once.
+    _place: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Fleet {
     /// Starts a cluster of the names given, with the settings given.
     pub async fn start(names: &[&str], settings: openraft::Config) -> Self {
+        let place = a_place().await;
         let authority = ek_ek_peer::create(now()).expect("an authority is created");
         let mut nodes = Vec::new();
 
@@ -349,7 +352,11 @@ impl Fleet {
             nodes.push(one(&authority, name, settings.clone()).await);
         }
 
-        Self { nodes, settings }
+        Self {
+            nodes,
+            settings,
+            _place: place,
+        }
     }
 
     /// Brings the cluster into being and waits for a leader.
@@ -379,7 +386,16 @@ impl Fleet {
         self.await_leader().await;
     }
 
-    /// Waits until every running node names the same leader.
+    /// Waits until every running node names the same leader, and that leader
+    /// can reach a quorum.
+    ///
+    /// Both, because they are different questions. `leader()` answers from a
+    /// node's own metrics and a leader that has not heartbeated a quorum yet
+    /// still names itself, while `reachable()` costs a round to a quorum and
+    /// answers whether the cluster is actually there (ADR-0085). A write is
+    /// refused rather than made to wait (ADR-0004), so a measurement that
+    /// wrote on the strength of the belief alone would be asking at a moment
+    /// the product is entitled to refuse.
     pub async fn await_leader(&self) -> NodeId {
         let settled = wait_until(PATIENCE, || {
             let named: Vec<Option<NodeId>> =
@@ -388,7 +404,30 @@ impl Fleet {
             first.filter(|leader| named.iter().all(|held| held.as_ref() == Some(leader)))
         })
         .await;
-        settled.expect("a leader is elected")
+        let named = settled.expect("a leader is elected");
+        self.await_quorum().await;
+        named
+    }
+
+    /// Waits until the node that leads can reach a quorum.
+    pub async fn await_quorum(&self) {
+        let started = Instant::now();
+        loop {
+            if let Some(leader) = self.running().find(|node| node.cluster().is_leader())
+                && leader.cluster().reachable().await.is_ok()
+            {
+                return;
+            }
+            assert!(
+                started.elapsed() <= PATIENCE,
+                "no leader could reach a quorum within {PATIENCE:?}"
+            );
+            // Slower than the other waits here, because this question costs a
+            // heartbeat round to a quorum while they are local reads. Asking
+            // it forty times a second would add the very load it is waiting
+            // for the machine to work through.
+            tokio::time::sleep(QUORUM_POLL).await;
+        }
     }
 
     /// The nodes that are running.
@@ -542,11 +581,14 @@ pub struct Cohort {
     pub moment: Moment,
     /// The settings every node runs.
     pub settings: openraft::Config,
+    /// This cluster's place among the ones running at once.
+    _place: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Cohort {
     /// Founds a cluster of one, holding an authority and a config.
     pub async fn found(name: &str, settings: openraft::Config) -> Self {
+        let place = a_place().await;
         let authority = ek_ek_peer::create(now()).expect("an authority is created");
         let moment = Moment::real();
         let founder = admitting(&authority, name, settings.clone(), &moment).await;
@@ -565,6 +607,7 @@ impl Cohort {
             authority,
             moment,
             settings,
+            _place: place,
         };
         cohort.await_leader().await;
 
@@ -692,6 +735,31 @@ impl Cohort {
 
     /// Waits until every node names the same leader.
     pub async fn await_leader(&self) -> NodeId {
+        let named = self.await_named().await;
+        let started = Instant::now();
+        loop {
+            if let Some(member) = self
+                .members
+                .iter()
+                .find(|member| member.cluster.is_leader())
+                && member.cluster.reachable().await.is_ok()
+            {
+                return named;
+            }
+            assert!(
+                started.elapsed() <= PATIENCE,
+                "no leader could reach a quorum within {PATIENCE:?}"
+            );
+            // Slower than the other waits here, because this question costs a
+            // heartbeat round to a quorum while they are local reads. Asking
+            // it forty times a second would add the very load it is waiting
+            // for the machine to work through.
+            tokio::time::sleep(QUORUM_POLL).await;
+        }
+    }
+
+    /// Waits until every member names the same leader.
+    async fn await_named(&self) -> NodeId {
         let settled = wait_until(PATIENCE, || {
             let named: Vec<Option<NodeId>> = self
                 .members
@@ -813,6 +881,55 @@ pub fn founding_config(founder: &NodeId) -> Config {
     }
 }
 
+/// How many clusters of real nodes may run at one time.
+///
+/// A cluster here is three processes' worth of consensus on one runtime
+/// thread, and every Raft call opens its own mutually authenticated connection
+/// (`crate::network`), so a heartbeat costs a full handshake at both ends.
+/// Left to itself the test runner starts one measurement per core, which is
+/// forty odd nodes handshaking at each other on one machine; the leaders are
+/// then starved of scheduling slots and deposed by their own followers, and
+/// what fails is the machine rather than the rule under measurement.
+///
+/// Four is what one machine carries with room to spare. The measurements still
+/// run in parallel; only the heavy part of them queues.
+const FLEETS_AT_ONCE: usize = 4;
+
+/// Waits for a place to run a cluster in.
+///
+/// The permit is held for the cluster's whole life and released when it is
+/// dropped, so the next measurement starts as this one finishes.
+async fn a_place() -> tokio::sync::OwnedSemaphorePermit {
+    static HELD: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    // Never closed, so the only way this fails is a bug in the harness rather
+    // than anything a measurement did.
+    Arc::clone(HELD.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(FLEETS_AT_ONCE))))
+        .acquire_owned()
+        .await
+        .expect("the semaphore is open")
+}
+
+/// How often a measurement asks whether the leader can reach a quorum.
+const QUORUM_POLL: Duration = Duration::from_millis(250);
+
+/// The timings a measurement runs, which are the product's own.
+///
+/// Faster ones were tried and they measured the machine instead of the rule.
+/// Every Raft call opens its own mutually authenticated connection
+/// (`crate::network`), so a heartbeat costs a full handshake at both ends, and
+/// openraft gives one heartbeat interval for the whole round trip. Shorten the
+/// interval and a loaded machine fails the round; a leader that fails the
+/// round cannot reach a quorum, and the write a measurement makes next is
+/// refused (ADR-0004). Only the snapshot policy below differs from what a node
+/// actually runs.
+const ELECTION_MIN_MS: u64 = ek_ek_raft::ELECTION_TIMEOUT_MIN_MS;
+
+/// The upper end of the range, so nodes do not all stand at the same instant.
+const ELECTION_MAX_MS: u64 = ek_ek_raft::ELECTION_TIMEOUT_MAX_MS;
+
+/// How often a leader says it is still there, and how long one round may take.
+const HEARTBEAT_MS: u64 = ek_ek_raft::HEARTBEAT_MS;
+
 /// Settings that reach a snapshot quickly.
 ///
 /// The product's own thresholds are in `Cluster::settings`, and a measurement
@@ -820,9 +937,9 @@ pub fn founding_config(founder: &NodeId) -> Config {
 /// configurations to reach one.
 pub fn brisk(snapshot_every: u64) -> openraft::Config {
     openraft::Config {
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        heartbeat_interval: 100,
+        election_timeout_min: ELECTION_MIN_MS,
+        election_timeout_max: ELECTION_MAX_MS,
+        heartbeat_interval: HEARTBEAT_MS,
         snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(snapshot_every),
         max_in_snapshot_log_to_keep: 0,
         purge_batch_size: 1,
@@ -835,9 +952,9 @@ pub fn brisk(snapshot_every: u64) -> openraft::Config {
 /// Settings that never take a snapshot on their own.
 pub fn steady() -> openraft::Config {
     openraft::Config {
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        heartbeat_interval: 100,
+        election_timeout_min: ELECTION_MIN_MS,
+        election_timeout_max: ELECTION_MAX_MS,
+        heartbeat_interval: HEARTBEAT_MS,
         snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(10_000),
         ..Default::default()
     }
